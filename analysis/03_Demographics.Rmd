@@ -1,0 +1,660 @@
+---
+title: "Demographics"
+author: "Miguel Angel Armengol de la Hoz"
+date: "August 1, 2018"
+output: html_document
+---
+
+# Libraries Data and sql connections load 
+
+```{r}
+#library(RPostgreSQL)
+library(DBI)
+library(dplyr)
+library(bigrquery)
+library(reshape)
+
+project_HST = ""
+```
+
+
+# Demographics
+
+```{r}
+demographics_all<-dbGetQuery(con,"with last_ventduration AS(
+SELECT icustay_id,mech_vent_duration_hrs FROM
+(
+SELECT
+	icustay_id
+	,ventdurations.duration_hours As mech_vent_duration_hrs
+	,Row_Number() Over (Partition By mimiciii.ventdurations.icustay_id Order By  mimiciii.ventdurations.ventnum DESC) As position
+	FROM mimiciii.ventdurations
+	) As ssq
+WHERE position = 1
+) 
+
+,first_icd9 AS(
+SELECT hadm_id, first_icd9 FROM
+(
+SELECT
+	hadm_id
+	,icd9_code as first_icd9
+	,Row_Number() Over (Partition By mimiciii.diagnoses_icd.hadm_id Order By mimiciii.diagnoses_icd.icd9_code ASC) As icd9_code_num
+	FROM mimiciii.diagnoses_icd
+	) As ssq
+WHERE icd9_code_num = 1
+) 
+
+
+SELECT distinct
+ mimiciii.icustays.subject_id
+,mimiciii.icustays.hadm_id
+,mimiciii.icustays.icustay_id
+,mimiciii.patients.gender
+,CASE 
+  WHEN Date_Part('year', Age(mimiciii.admissions.admittime, mimiciii.patients.dob)) > 89 THEN 91.4 
+  ELSE Date_Part('year', Age(mimiciii.admissions.admittime, mimiciii.patients.dob))
+ END  As age
+,EXTRACT(epoch FROM  mimiciii.admissions.dischtime - mimiciii.admissions.admittime)/60 AS length_of_stay_hrs
+,mimiciii.admissions.insurance
+,mimiciii.admissions.ethnicity
+,mimiciii.sofa.sofa
+,mimiciii.oasis.oasis
+,round(mimiciii.oasis.oasis_prob, 2) as oasis_prob
+,mimiciii.gcsfirstday.mingcs As mingcs_firstday
+,mimiciii.gcsfirstday.gcsmotor As gcsmotor_firstday
+,mimiciii.gcsfirstday.gcsverbal As gcsverbal_firstday
+,mimiciii.gcsfirstday.gcseyes As gcseyes_firstday
+,mimiciii.gcsfirstday.endotrachflag As endotrachflag_firstday
+,mimiciii.smoker.smoking
+,mimiciii.icustays.last_careunit
+,last_ventduration.mech_vent_duration_hrs
+FROM mimiciii.icustays 
+LEFT JOIN mimiciii.patients ON
+mimiciii.icustays.subject_id = mimiciii.patients.subject_id 
+LEFT JOIN mimiciii.admissions ON
+mimiciii.admissions.hadm_id = mimiciii.icustays.hadm_id
+LEFT JOIN  mimiciii.oasis ON
+mimiciii.oasis.icustay_id = mimiciii.icustays.icustay_id 
+LEFT JOIN first_icd9 ON 
+first_icd9.hadm_id = mimiciii.icustays.hadm_id 
+LEFT JOIN mimiciii.sofa ON
+mimiciii.sofa.icustay_id = mimiciii.icustays.icustay_id
+LEFT JOIN mimiciii.gcsfirstday ON
+mimiciii.gcsfirstday.icustay_id = mimiciii.icustays.icustay_id 
+LEFT JOIN mimiciii.smoker ON
+mimiciii.smoker.subject_id = mimiciii.icustays.subject_id 
+LEFT JOIN mimiciii.ventdurations ON
+mimiciii.icustays.icustay_id = mimiciii.ventdurations.icustay_id
+LEFT JOIN last_ventduration ON
+last_ventduration.icustay_id = mimiciii.icustays.icustay_id 	  
+ORDER BY hadm_id")
+
+```
+
+# GCS last day
+
+```{r}
+gcs_last_day<-dbGetQuery(con,"
+SET
+  search_path TO mimiciii;
+  -- itemids used:
+  -- CAREVUE
+  --    723 as GCSVerbal
+  --    454 as GCSMotor
+  --    184 as GCSEyes
+  -- METAVISION
+  --    223900 GCS - Verbal Response
+  --    223901 GCS - Motor Response
+  --    220739 GCS - Eye Opening
+  -- The code combines the itemids into the carevue itemids, then pivots thosei
+  -- So 223900 is changed to 723, then the itemid 723 is pivoted to form GCSVerbal
+  -- Note:
+  --  The GCS for sedated patients is defaulted to 15 in this code.
+  --  This is in line with how the data is meant to be collected.
+  --  e.g., from the SAPS II publication:
+  --    For sedated patients, the Glasgow Coma Score before sedation was used.
+  --    This was ascertained either from interviewing the physician who ordered the sedation,
+  --    or by reviewing the patient's medical record.
+WITH
+  base AS (
+  SELECT
+    pvt.hadm_id,
+    pvt.charttime
+    -- Easier names - note we coalesced Metavision and CareVue IDs below
+    ,
+    MAX(CASE WHEN pvt.itemid = 454 THEN pvt.valuenum
+        ELSE NULL END) AS GCSMotor,
+    MAX(CASE WHEN pvt.itemid = 723 THEN pvt.valuenum
+        ELSE NULL END) AS GCSVerbal,
+    MAX(CASE WHEN pvt.itemid = 184 THEN pvt.valuenum
+        ELSE NULL END) AS GCSEyes
+    -- If verbal was set to 0 in the below select, then this is an intubated patient
+    , CASE WHEN MAX(CASE WHEN pvt.itemid = 723 THEN pvt.valuenum
+         ELSE NULL END) = 0 THEN 1
+      ELSE 0
+    END AS EndoTrachFlag,
+    --This retrieves the last value per hadm_id
+    ROW_NUMBER () OVER (PARTITION BY pvt.hadm_id ORDER BY pvt.charttime DESC) AS rn
+  FROM (
+    SELECT
+      chartevents.hadm_id
+      -- merge the itemids so that the pivot applies to both metavision/carevue data
+      ,CASE WHEN chartevents.itemid IN (723,223900) THEN 723
+            WHEN chartevents.itemid IN (454,223901) THEN 454
+        WHEN chartevents.itemid IN (184, 220739) THEN 184
+        ELSE chartevents.itemid
+      END AS itemid
+      -- convert the data into a number, reserving a value of 0 for ET/Trach
+      ,CASE
+      -- endotrach/vent is assigned a value of 0, later parsed specially
+        WHEN chartevents.itemid = 723 AND chartevents.value = '1.0 ET/Trach' THEN 0 -- carevue
+        WHEN chartevents.itemid = 223900
+      AND chartevents.value = 'No Response-ETT' THEN 0 -- metavision
+        ELSE valuenum END AS valuenum,
+      chartevents.CHARTTIME
+    FROM
+      CHARTEVENTS 
+      -- get intime for charttime subselection
+    INNER JOIN admissions
+    ON CHARTEVENTS.hadm_id = admissions.hadm_id
+      -- Isolate the desired GCS variables
+    WHERE
+    chartevents.itemid IN (
+        -- 198 -- GCS
+        184, 454, 723 -- GCS components, CareVue
+        , 223900, 223901, 220739 )-- GCS components, Metavision
+      -- exclude rows marked as error
+      AND CHARTEVENTS.error IS DISTINCT FROM 1 ) pvt
+  GROUP BY
+    pvt.hadm_id,
+    pvt.charttime ),
+  gcs AS (
+  SELECT
+    b.*,
+    b2.GCSVerbal AS GCSVerbalPrev,
+    b2.GCSMotor AS GCSMotorPrev,
+    b2.GCSEyes AS GCSEyesPrev
+    -- Calculate GCS, factoring in special case when they are intubated and prev vals
+    -- note that the coalesce are used to implement the following if:
+    --  if current value exists, use it
+    --  if previous value exists, use it
+    --  otherwise, default to normal
+    ,
+    CASE
+    -- replace GCS during sedation with 15
+      WHEN b.GCSVerbal = 0 THEN 15
+      WHEN b.GCSVerbal IS NULL AND b2.GCSVerbal = 0 THEN 15
+    -- if previously they were intub, but they aren't now, do not use previous GCS values
+      WHEN b2.GCSVerbal = 0 THEN coalesce(b.GCSMotor, 6) + coalesce(b.GCSVerbal, 5) + coalesce(b.GCSEyes, 4)
+    -- otherwise, add up score normally, imputing previous value if none available at current time
+      ELSE coalesce(b.GCSMotor, coalesce(b2.GCSMotor, 6)) + coalesce(b.GCSVerbal, coalesce(b2.GCSVerbal, 5)) + coalesce(b.GCSEyes, coalesce(b2.GCSEyes, 4))
+    END AS GCS
+  FROM
+    base b
+    -- join to itself within 6 hours to get previous value
+  LEFT JOIN
+    base b2
+  ON
+    b.hadm_id = b2.hadm_id
+    AND b.rn = b2.rn+1 ),
+  gcs_final AS (
+  SELECT
+    gcs.* -- This sorts the data by GCS, so rn=1 is the the lowest GCS values to keep
+   ,ROW_NUMBER () OVER (PARTITION BY gcs.hadm_id ORDER BY gcs.GCS ) AS IsMinGCS
+  FROM gcs     )
+SELECT
+   admissions.subject_id
+  ,admissions.hadm_id
+  ,gcs_final.charttime
+  ,admissions.deathtime
+, EXTRACT(epoch FROM admissions.deathtime - gcs_final.charttime)/3600 AS hrs_from_gcs_to_death
+  -- The minimum GCS is determined by the above row partition, we only join if IsMinGCS=1
+  ,GCS AS last_MinGCS
+  ,coalesce(GCSMotor, GCSMotorPrev) AS last_GCSMotor
+  ,coalesce(GCSVerbal, GCSVerbalPrev) AS last_GCSVerbal
+  ,coalesce(GCSEyes, GCSEyesPrev) AS last_GCSEyes
+  ,EndoTrachFlag AS last_EndoTrachFlag
+  -- subselect down to the cohort of eligible patients
+FROM
+  admissions
+LEFT JOIN
+  gcs_final
+ON
+  admissions.hadm_id = gcs_final.hadm_id
+  AND gcs_final.IsMinGCS = 1
+AND admissions.deathtime IS NOT NULL
+ORDER BY
+  admissions.hadm_id ;
+")
+
+
+hadm_ids_fromourcohort24<-cmo_and_extubation_and_death_24$hadm_id
+
+#hrs from gcs to extubation has to be positive.
+gcs_last_day$hrs_from_gsc_to_death<-round(gcs_last_day$hrs_from_gcs_to_death,2)
+
+gcs_last_day<-gcs_last_day %>%
+  filter(!is.na(deathtime) & !is.na(charttime) & hadm_id %in% hadm_ids_fromourcohort24)
+
+gcs_last_day<-gcs_last_day %>%
+  select(subject_id,last_mingcs,last_gcsmotor,last_gcsverbal,last_gcseyes,last_endotrachflag)
+
+```
+
+# Top 4 Last Vent Mode last day pre Ext
+
+## Extraction
+
+```{r}
+query<-"
+SELECT distinct subject_id
+,charttime
+,value
+FROM `physionet-data.mimiciii_clinical.chartevents` chartevents
+WHERE  
+itemid IN(223849,467,720)
+AND value IS NOT NULL
+AND value != 'Standby' 
+ORDER BY subject_id                     
+"
+
+vent_mode_last_pre_ext<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+```
+
+## Filter
+
+```{r}
+
+vent_mode_last_pre_ext_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], vent_mode_last_pre_ext)
+
+vent_mode_last_pre_ext_tofilter<-dplyr::rename(vent_mode_last_pre_ext_tofilter,charttime_last_pre_ext_ventmode=charttime)
+vent_mode_last_pre_ext_tofilter<-dplyr::rename(vent_mode_last_pre_ext_tofilter,last_vent_mode=value)
+
+# we noticed some timezones are alteterd, so we reset them
+vent_mode_last_pre_ext_tofilter$charttime_last_pre_ext_ventmode<-as.character(vent_mode_last_pre_ext_tofilter$charttime_last_pre_ext_ventmode)
+vent_mode_last_pre_ext_tofilter$charttime.extubation<-as.character(vent_mode_last_pre_ext_tofilter$charttime.extubation)
+vent_mode_last_pre_ext_tofilter$deathtime<-as.character(vent_mode_last_pre_ext_tofilter$deathtime)
+
+
+vent_mode_last_pre_ext_tofilter$charttime_last_pre_ext_ventmode<-as.POSIXct(vent_mode_last_pre_ext_tofilter$charttime_last_pre_ext_ventmode, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+vent_mode_last_pre_ext_tofilter$charttime.extubation<-as.POSIXct(vent_mode_last_pre_ext_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+vent_mode_last_pre_ext_tofilter$deathtime<-as.POSIXct(vent_mode_last_pre_ext_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+vent_mode_last_pre_ext_tofilter['time_from_last_vent_mode_to_ext_min']<-difftime(vent_mode_last_pre_ext_tofilter$charttime.extubation,vent_mode_last_pre_ext_tofilter$charttime_last_pre_ext_ventmode,units = 'mins')
+  
+
+vent_mode_last_pre_ext_tofilter<-vent_mode_last_pre_ext_tofilter %>%
+  filter( 
+          time_from_last_vent_mode_to_ext_min >=0
+          )
+
+n_distinct(vent_mode_last_pre_ext_tofilter$subject_id)
+
+vent_mode_last_pre_ext_tofilter<-vent_mode_last_pre_ext_tofilter%>%arrange(subject_id, time_from_last_vent_mode_to_ext_min)
+
+vent_mode_last_pre_ext_final<-vent_mode_last_pre_ext_tofilter[!duplicated(vent_mode_last_pre_ext_tofilter$subject_id),] 
+vent_mode_last_pre_ext_final<-vent_mode_last_pre_ext_final%>%select(subject_id,time_from_last_vent_mode_to_ext_min,last_vent_mode)
+```
+
+
+# Top 15 ICD9 Codes
+
+```{r}
+query<-paste("SELECT subject_id, hadm_id, seq_num, icd9_code
+  FROM 
+            `physionet-data.mimiciii_clinical.diagnoses_icd`diagnoses_icd
+  WHERE
+  seq_num <= 15
+AND
+hadm_id IN (",hadm_ids_fromourcohort24,")
+")
+
+top15icd9_codes<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+top15icd9_codes %>% group_by(subject_id) %>% table(mutate(isconsecutive = seq_num - lag(seq_num))   )
+
+our_chohort_icd9_codes<-unique(top15icd9_codes$icd9_code)
+our_chohort_icd9_codes<-paste0(sprintf("'%s'", our_chohort_icd9_codes), collapse = ", ")
+
+query<-paste("SELECT icd9_code, short_title
+  FROM 
+            `physionet-data.mimiciii_clinical.d_icd_diagnoses` d_icd_diagnoses
+  WHERE
+  icd9_code IN (",our_chohort_icd9_codes,")
+")
+
+our_chohort_icd9_codes_labels<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+top15icd9_codes_with_labels<-inner_join(top15icd9_codes,our_chohort_icd9_codes_labels)
+
+top15icd9_codes_with_labels<-top15icd9_codes_with_labels %>%
+  select(subject_id,seq_num,short_title)
+
+top15icd9_codes_with_labels_sumarized<-reshape( data = top15icd9_codes_with_labels,direction = 'wide'
+        ,idvar = 'subject_id'
+        ,timevar = 'seq_num'
+        )
+names(top15icd9_codes_with_labels_sumarized) <- gsub(x = names(top15icd9_codes_with_labels_sumarized), pattern = "short_title", replacement = "icd9_code_num")  
+
+```
+
+# Last Pao2Fio2 pre Ext
+
+## Extraction
+
+```{r}
+query<-paste("with pvt as
+( -- begin query that extracts the data
+  select ie.subject_id, ie.hadm_id, ie.icustay_id
+  -- here we assign labels to ITEMIDs
+  -- this also fuses together multiple ITEMIDs containing the same data
+      , case
+        when itemid = 50800 then 'SPECIMEN'
+        when itemid = 50801 then 'AADO2'
+        when itemid = 50802 then 'BASEEXCESS'
+        when itemid = 50803 then 'BICARBONATE'
+        when itemid = 50804 then 'TOTALCO2'
+        when itemid = 50805 then 'CARBOXYHEMOGLOBIN'
+        when itemid = 50806 then 'CHLORIDE'
+        when itemid = 50808 then 'CALCIUM'
+        when itemid = 50809 then 'GLUCOSE'
+        when itemid = 50810 then 'HEMATOCRIT'
+        when itemid = 50811 then 'HEMOGLOBIN'
+        when itemid = 50812 then 'INTUBATED'
+        when itemid = 50813 then 'LACTATE'
+        when itemid = 50814 then 'METHEMOGLOBIN'
+        when itemid = 50815 then 'O2FLOW'
+        when itemid = 50816 then 'FIO2'
+        when itemid = 50817 then 'SO2' -- OXYGENSATURATION
+        when itemid = 50818 then 'PCO2'
+        when itemid = 50819 then 'PEEP'
+        when itemid = 50820 then 'PH'
+        when itemid = 50821 then 'PO2'
+        when itemid = 50822 then 'POTASSIUM'
+        when itemid = 50823 then 'REQUIREDO2'
+        when itemid = 50824 then 'SODIUM'
+        when itemid = 50825 then 'TEMPERATURE'
+        when itemid = 50826 then 'TIDALVOLUME'
+        when itemid = 50827 then 'VENTILATIONRATE'
+        when itemid = 50828 then 'VENTILATOR'
+        else null
+        end as label
+        , charttime
+        , value
+        -- add in some sanity checks on the values
+        , case
+          when valuenum <= 0 then null
+          when itemid = 50810 and valuenum > 100 then null -- hematocrit
+          -- ensure FiO2 is a valid number between 21-100
+          -- mistakes are rare (<100 obs out of ~100,000)
+          -- there are 862 obs of valuenum == 20 - some people round down!
+          -- rather than risk imputing garbage data for FiO2, we simply NULL invalid values
+          when itemid = 50816 and valuenum < 20 then null
+          when itemid = 50816 and valuenum > 100 then null
+          when itemid = 50817 and valuenum > 100 then null -- O2 sat
+          when itemid = 50815 and valuenum >  70 then null -- O2 flow
+          when itemid = 50821 and valuenum > 800 then null -- PO2
+           -- conservative upper limit
+        else valuenum
+        end as valuenum
+
+    FROM `physionet-data.mimiciii_clinical.icustays` ie
+    left join `physionet-data.mimiciii_clinical.labevents` le
+      on le.subject_id = ie.subject_id and le.hadm_id = ie.hadm_id
+--      and le.charttime between (DATETIME_SUB(ie.intime, INTERVAL 6 HOUR)) and (DATETIME_ADD(ie.intime, INTERVAL 1 DAY))
+      and le.ITEMID in
+      -- blood gases
+      (
+        50800, 50801, 50802, 50803, 50804, 50805, 50806, 50807, 50808, 50809
+        , 50810, 50811, 50812, 50813, 50814, 50815, 50816, 50817, 50818, 50819
+        , 50820, 50821, 50822, 50823, 50824, 50825, 50826, 50827, 50828
+        , 51545
+      )
+), bloodgas_alldays AS(
+select pvt.SUBJECT_ID, pvt.HADM_ID, pvt.ICUSTAY_ID, pvt.CHARTTIME
+, max(case when label = 'SPECIMEN' then value else null end) as SPECIMEN
+, max(case when label = 'AADO2' then valuenum else null end) as AADO2
+, max(case when label = 'BASEEXCESS' then valuenum else null end) as BASEEXCESS
+, max(case when label = 'BICARBONATE' then valuenum else null end) as BICARBONATE
+, max(case when label = 'TOTALCO2' then valuenum else null end) as TOTALCO2
+, max(case when label = 'CARBOXYHEMOGLOBIN' then valuenum else null end) as CARBOXYHEMOGLOBIN
+, max(case when label = 'CHLORIDE' then valuenum else null end) as CHLORIDE
+, max(case when label = 'CALCIUM' then valuenum else null end) as CALCIUM
+, max(case when label = 'GLUCOSE' then valuenum else null end) as GLUCOSE
+, max(case when label = 'HEMATOCRIT' then valuenum else null end) as HEMATOCRIT
+, max(case when label = 'HEMOGLOBIN' then valuenum else null end) as HEMOGLOBIN
+, max(case when label = 'INTUBATED' then valuenum else null end) as INTUBATED
+, max(case when label = 'LACTATE' then valuenum else null end) as LACTATE
+, max(case when label = 'METHEMOGLOBIN' then valuenum else null end) as METHEMOGLOBIN
+, max(case when label = 'O2FLOW' then valuenum else null end) as O2FLOW
+, max(case when label = 'FIO2' then valuenum else null end) as FIO2
+, max(case when label = 'SO2' then valuenum else null end) as SO2 -- OXYGENSATURATION
+, max(case when label = 'PCO2' then valuenum else null end) as PCO2
+, max(case when label = 'PEEP' then valuenum else null end) as PEEP
+, max(case when label = 'PH' then valuenum else null end) as PH
+, max(case when label = 'PO2' then valuenum else null end) as PO2
+, max(case when label = 'POTASSIUM' then valuenum else null end) as POTASSIUM
+, max(case when label = 'REQUIREDO2' then valuenum else null end) as REQUIREDO2
+, max(case when label = 'SODIUM' then valuenum else null end) as SODIUM
+, max(case when label = 'TEMPERATURE' then valuenum else null end) as TEMPERATURE
+, max(case when label = 'TIDALVOLUME' then valuenum else null end) as TIDALVOLUME
+, max(case when label = 'VENTILATIONRATE' then valuenum else null end) as VENTILATIONRATE
+, max(case when label = 'VENTILATOR' then valuenum else null end) as VENTILATOR
+from pvt
+group by pvt.subject_id, pvt.hadm_id, pvt.icustay_id, pvt.CHARTTIME
+order by pvt.subject_id, pvt.hadm_id, pvt.icustay_id, pvt.CHARTTIME
+),stg_spo2 AS (
+  SELECT
+    SUBJECT_ID,
+    HADM_ID,
+    ICUSTAY_ID,
+    CHARTTIME
+    -- max here is just used to group SpO2 by charttime
+    ,
+    MAX(CASE
+        WHEN valuenum <= 0 OR valuenum > 100 THEN NULL
+        ELSE valuenum END) AS SpO2
+  FROM
+    `physionet-data.mimiciii_clinical.chartevents`
+    -- o2 sat
+  WHERE
+    ITEMID IN ( 646 -- SpO2
+      ,
+      220277 -- O2 saturation pulseoxymetry
+      )
+  GROUP BY
+    SUBJECT_ID,
+    HADM_ID,
+    ICUSTAY_ID,
+    CHARTTIME ),
+  stg_fio2 AS (
+  SELECT
+    SUBJECT_ID,
+    HADM_ID,
+    ICUSTAY_ID,
+    CHARTTIME
+    -- pre-process the FiO2s to ensure they are between 21-100%
+    ,
+    MAX(
+      CASE
+        WHEN itemid = 223835 THEN CASE
+        WHEN valuenum > 0
+      AND valuenum <= 1 THEN valuenum * 100
+      -- improperly input data - looks like O2 flow in litres
+        WHEN valuenum > 1 AND valuenum < 21 THEN NULL
+        WHEN valuenum >= 21
+      AND valuenum <= 100 THEN valuenum
+        ELSE NULL END -- unphysiological
+        WHEN itemid IN (3420,  3422)
+      -- all these values are well formatted
+      THEN valuenum
+        WHEN itemid = 190
+      AND valuenum > 0.20
+      AND valuenum < 1
+      -- well formatted but not in %
+      THEN valuenum * 100
+        ELSE NULL
+      END ) AS fio2_chartevents
+  FROM
+    `physionet-data.mimiciii_clinical.chartevents`
+  WHERE
+    ITEMID IN ( 3420 -- FiO2
+      ,
+      190 -- FiO2 set
+      ,
+      223835 -- Inspired O2 Fraction (FiO2)
+      ,
+      3422 -- FiO2 [measured]
+      )
+    -- exclude rows marked as error
+    AND (error IS NULL
+      OR error = 1)
+  GROUP BY
+    SUBJECT_ID,
+    HADM_ID,
+    ICUSTAY_ID,
+    CHARTTIME ),
+  stg2 AS (
+  SELECT
+    bg.*,
+    ROW_NUMBER() OVER (PARTITION BY bg.icustay_id, bg.charttime ORDER BY s1.charttime DESC) AS lastRowSpO2,
+    s1.spo2
+  FROM
+    bloodgas_alldays bg
+  LEFT JOIN
+    stg_spo2 s1
+    -- same patient
+  ON
+    bg.icustay_id = s1.icustay_id
+    -- spo2 occurred at most 2 hours before this blood gas
+    AND s1.charttime >= DATETIME_SUB(bg.charttime,
+      INTERVAL 2 HOUR)
+    AND s1.charttime <= bg.charttime
+  WHERE
+    bg.po2 IS NOT NULL ),
+  stg3 AS (
+  SELECT
+    bg.*,
+    ROW_NUMBER() OVER (PARTITION BY bg.icustay_id, bg.charttime ORDER BY s2.charttime DESC) AS lastRowFiO2,
+    s2.fio2_chartevents
+    -- create our specimen prediction
+    ,
+    1/(1+EXP(-(-0.02544 + 0.04598 * po2 + coalesce(-0.15356 * spo2,
+            -0.15356 * 97.49420 + 0.13429) + coalesce( 0.00621 * fio2_chartevents,
+            0.00621 * 51.49550 + -0.24958) + coalesce( 0.10559 * hemoglobin,
+            0.10559 * 10.32307 + 0.05954) + coalesce( 0.13251 * so2,
+            0.13251 * 93.66539 + -0.23172) + coalesce(-0.01511 * pco2,
+            -0.01511 * 42.08866 + -0.01630) + coalesce( 0.01480 * fio2,
+            0.01480 * 63.97836 + -0.31142) + coalesce(-0.00200 * aado2,
+            -0.00200 * 442.21186 + -0.01328) + coalesce(-0.03220 * bicarbonate,
+            -0.03220 * 22.96894 + -0.06535) + coalesce( 0.05384 * totalco2,
+            0.05384 * 24.72632 + -0.01405) + coalesce( 0.08202 * lactate,
+            0.08202 * 3.06436 + 0.06038) + coalesce( 0.10956 * ph,
+            0.10956 * 7.36233 + -0.00617) + coalesce( 0.00848 * o2flow,
+            0.00848 * 7.59362 + -0.35803) ))) AS SPECIMEN_PROB
+  FROM
+    stg2 bg
+  LEFT JOIN
+    stg_fio2 s2
+    -- same patient
+  ON
+    bg.icustay_id = s2.icustay_id
+    -- fio2 occurred at most 4 hours before this blood gas
+    AND s2.charttime BETWEEN DATETIME_SUB(bg.charttime,
+      INTERVAL 4 HOUR)
+    AND bg.charttime
+  WHERE
+    bg.lastRowSpO2 = 1 -- only the row with the most recent SpO2 (if no SpO2 found lastRowSpO2 = 1)
+    )
+SELECT
+  subject_id,
+  hadm_id,
+  icustay_id,
+  charttime,
+  SPECIMEN -- raw data indicating sample type, only present 80% of the time
+  -- prediction of specimen for missing data
+  -- oxygen related parameters
+  ,
+  SO2,
+  spo2 -- note spo2 is FROM `physionet-data.mimiciii_clinical.chartevents`
+  ,
+  PO2,
+  PCO2,
+  fio2_chartevents,
+  FIO2,
+  AADO2
+  -- also calculate AADO2
+  ,
+  CASE
+    WHEN PO2 IS NOT NULL AND pco2 IS NOT NULL AND coalesce(FIO2,  fio2_chartevents) IS NOT NULL
+  -- multiple by 100 because FiO2 is in a % but should be a fraction
+  THEN (coalesce(FIO2,  fio2_chartevents)/100) * (760 - 47) - (pco2/0.8) - po2
+    ELSE NULL
+  END AS AADO2_calc,
+  CASE
+    WHEN PO2 IS NOT NULL AND coalesce(FIO2,  fio2_chartevents) IS NOT NULL
+  -- multiply by 100 because FiO2 is in a % but should be a fraction
+  THEN 100*PO2/(coalesce(FIO2,  fio2_chartevents))
+    ELSE NULL
+  END AS PaO2FiO2
+  -- acid-base parameters
+FROM
+  stg3
+WHERE
+  lastRowFiO2 = 1 -- only the most recent FiO2
+  -- restrict it to *only* arterial samples
+  AND (SPECIMEN = 'ART'
+    OR SPECIMEN_PROB > 0.75)
+ORDER BY
+  icustay_id,
+  charttime
+")
+
+last_pao2fio2<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+```
+
+## Filter 
+
+```{r}
+last_pao2fio2<-last_pao2fio2%>%select(subject_id,hadm_id,icustay_id,charttime,PaO2FiO2)
+
+last_pao2fio2<-last_pao2fio2[complete.cases(last_pao2fio2),]
+
+last_pao2fio2_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], last_pao2fio2)
+
+last_pao2fio2_from_patients_tofilter<-dplyr::rename(last_pao2fio2_from_patients_tofilter,charttime_last_pao2fio2=charttime)
+
+# we noticed some timezones are alteterd, so we reset them
+last_pao2fio2_from_patients_tofilter$charttime_last_pao2fio2<-as.character(last_pao2fio2_from_patients_tofilter$charttime_last_pao2fio2)
+last_pao2fio2_from_patients_tofilter$charttime.extubation<-as.character(last_pao2fio2_from_patients_tofilter$charttime.extubation)
+last_pao2fio2_from_patients_tofilter$deathtime<-as.character(last_pao2fio2_from_patients_tofilter$deathtime)
+
+
+last_pao2fio2_from_patients_tofilter$charttime_last_pao2fio2<-as.POSIXct(last_pao2fio2_from_patients_tofilter$charttime_last_pao2fio2, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+last_pao2fio2_from_patients_tofilter$charttime.extubation<-as.POSIXct(last_pao2fio2_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+last_pao2fio2_from_patients_tofilter$deathtime<-as.POSIXct(last_pao2fio2_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+last_pao2fio2_from_patients_tofilter['time_from_last_pao2fio2_to_ext_min']<-difftime(last_pao2fio2_from_patients_tofilter$charttime.extubation,last_pao2fio2_from_patients_tofilter$charttime_last_pao2fio2,units = 'mins')
+  
+
+last_pao2fio2_patients<-last_pao2fio2_from_patients_tofilter %>%
+  filter( 
+          time_from_last_pao2fio2_to_ext_min >=0
+          )
+
+n_distinct(last_pao2fio2_patients$subject_id) 
+
+last_pao2fio2_patients<-last_pao2fio2_patients%>%arrange(subject_id, time_from_last_pao2fio2_to_ext_min)
+
+last_pao2fio2_patients_final<-last_pao2fio2_patients[!duplicated(last_pao2fio2_patients$subject_id),] 
+last_pao2fio2_patients_final<-last_pao2fio2_patients_final%>%select(subject_id,time_from_last_pao2fio2_to_ext_min,PaO2FiO2)
+```
+
+
+
+
+
+
+

@@ -1,0 +1,303 @@
+---
+title: "Cohort Creation"
+author: "Miguel Angel Armengol de la Hoz"
+date: "August 1, 2018"
+output: html_document
+---
+
+# SQL connection
+
+```{r}
+library(RPostgreSQL)
+library(DBI)
+
+pw<- {
+  'admin'
+}
+drv <- dbDriver("PostgreSQL")
+con <- dbConnect( drv
+     , host='localhost'
+     , port='5432'
+     , dbname='mimiciii'
+     , user=''
+     , password=pw)
+
+
+rm(pw) # removes the password
+```
+
+## Data extraction
+
+### CMO
+
+```{r}
+code_status_cmo<-dbGetQuery(con,'
+with sq as(SELECT distinct subject_id, hadm_id, icustay_id
+  ,COALESCE(timecmo_chart, timecmo_nursingnote, NULL ) AS codestatus_time
+,Row_Number() Over (Partition By code_status.subject_id ORDER BY COALESCE(timecmo_chart, timecmo_nursingnote, NULL ) Desc) As position
+  FROM mimiciii.code_status
+  WHERE
+  cmo_first = 1 OR
+  cmo_last = 1 OR
+  cmo = 1)
+SELECT
+subject_id
+,hadm_id
+,icustay_id
+,codestatus_time
+FROM sq
+WHERE
+position=1
+')
+
+noteevents_cmo<-dbGetQuery(con,"with sq AS(SELECT distinct subject_id, hadm_id 
+,Row_Number() Over (Partition By noteevents.subject_id ORDER BY noteevents.charttime Desc) As position,
+ charttime AS charttime
+FROM mimiciii.noteevents
+WHERE 
+text ILIKE '%cmo%'
+OR
+text ILIKE '%comfort meas%'
+OR
+text ILIKE '%terminal ext%'
+OR
+text ILIKE '%terminally ext%'
+)
+SELECT subject_id, hadm_id, charttime
+FROM sq
+WHERE position =1 ")
+
+noteevents_cmo<-unique(noteevents_cmo)
+
+more_cmo_using_nlptool<-dbGetQuery(con,"with sq as(
+SELECT DISTINCT subject_id
+,hadm_id
+,charttime
+,Row_Number() Over (Partition By mimiciii.noteevents.subject_id Order By  mimiciii.noteevents.charttime DESC) As position
+  FROM mimiciii.noteevents
+  WHERE
+  text similar to '%(made comfort measures only%|confort measures|cmo status|confort measures only|pursue comfort measures|dnr/dni/comfort|institute comfort measures|comfort measures only|comfort measure|terminally extubated|comfort focused|comfort-measures-only|made comfort measures|made cmo|cmo|comfort measures|comfort measures only|confort care|comfort care|comofort)%'
+ )
+SELECT
+ subject_id
+ ,hadm_id 
+ ,charttime
+FROM sq
+WHERE position =1 --we only want the hadm_id associated with the very last note
+ORDER BY subject_id")
+
+```
+
+#### Union
+
+```{r}
+#preparing datasets for union
+library(dplyr)
+# noteevents_cmo_notin_cs<-subset(noteevents_cmo, !(noteevents_cmo$subject_id %in% code_status_cmo$subject_id) )
+# colnames(noteevents_cmo_notin_cs)[3]<-'charttime'
+
+code_status_cmo$icustay_id<-NULL
+code_status_cmo<- code_status_cmo %>%
+  select(subject_id, hadm_id,codestatus_time)
+colnames(code_status_cmo)[3]<-'charttime'
+
+cmo_final<-union(code_status_cmo,noteevents_cmo)
+cmo_final<-union(cmo_final,more_cmo_using_nlptool)
+
+#we sort if descendand
+cmo_final<-cmo_final[order(-cmo_final$subject_id,-unclass(cmo_final$charttime)), ]
+#we take only the first (most recent) timestamp per hadm_id
+cmo_final<-cmo_final[!duplicated(cmo_final$subject_id),]
+
+
+```
+
+### Extubated
+
+```{r}
+extubated_procedureevents_mv<-dbGetQuery(con,'
+with select_sq AS(
+SELECT subject_id
+,hadm_id
+,icustay_id 
+,starttime AS charttime,
+  Row_Number() Over (PARTITION BY procedureevents_mv.subject_id ORDER BY procedureevents_mv.starttime Desc) As position
+  FROM mimiciii.procedureevents_mv
+  where itemid =   227194 -- "Extubation"
+  )
+  SELECT subject_id, hadm_id, icustay_id,charttime 
+  FROM select_sq
+  WHERE position =1
+')
+
+
+# we add this columns to identify which patients are gettin the extubation from the most reliable extubation time source
+extubated_procedureevents_mv['extubated_in_procedureevents']<-1
+
+# we identified extubation using this table by considering those patients who were receiving mechanical ventilation and suddently it stopped as extubated patients.
+mv_chartevents<-dbGetQuery(con,"with sq AS(
+SELECT distinct subject_id
+,hadm_id
+,icustay_id
+,charttime AS charttime
+,Row_Number() OVER (PARTITION BY chartevents.subject_id ORDER BY chartevents.charttime DESC) As position
+FROM mimiciii.chartevents
+WHERE  
+(itemid = 720 and value != 'Other/Remarks') -- VentTypeRecorded
+OR (itemid = 223848 and value != 'Other')
+OR (itemid = 223849) -- ventilator mode
+OR (itemid = 467 and value = 'Ventilator') -- O2 delivery device == ventilator
+OR itemid in
+	(
+	445, 448, 449, 450, 1340, 1486, 1600, 224687 -- minute volume
+	, 639, 654, 681, 682, 683, 684,224685,224684,224686 -- tidal volume
+	, 218,436,535,444,459,224697,224695,224696,224746,224747 -- High/Low/Peak/Mean/Neg insp force ('RespPressure')
+	, 221,1,1211,1655,2000,226873,224738,224419,224750,227187 -- Insp pressure
+	, 543 -- PlateauPressure
+	, 5865,5866,224707,224709,224705,224706 -- APRV pressure
+	, 60,437,505,506,686,220339,224700 -- PEEP
+	, 3459 -- high pressure relief
+	, 501,502,503,224702 -- PCV
+	, 223,667,668,669,670,671,672 -- TCPCV
+	, 224701 -- PSVlevel
+	)
+)
+SELECT sq.subject_id
+,sq.hadm_id
+,sq.icustay_id
+,sq.charttime
+FROM sq
+INNER JOIN mimiciii.icustays
+ON sq.hadm_id = icustays.hadm_id 
+WHERE POSITION = 1
+AND
+(dbsource = 'metavision' OR dbsource = 'both')
+ORDER BY  hadm_id ASC	")
+
+```
+
+#### Union
+
+```{r}
+
+mv_chartevents<-unique(mv_chartevents)
+
+#Performing union in both datasets
+
+extubated_final<-union(extubated_procedureevents_mv,mv_chartevents)
+#we sort if descendand
+extubated_final<-extubated_final[order(-extubated_final$subject_id,-unclass(extubated_final$charttime)), ]
+
+#we take only the first (most recent) timestamp per hadm_id
+extubated_final<-extubated_final[!duplicated(extubated_final$subject_id),]
+```
+
+
+### CMO and extubation
+
+```{r}
+library(dplyr)
+
+cmo_extubation<-inner_join(extubated_final, cmo_final, by = c("subject_id"))
+colnames(cmo_extubation)<-c("subject_id","hadm_id.extubation",'icustay_id',"charttime.extubation","hadm_id.cmo","charttime.cmo")
+
+cmo_extubation<-unique(cmo_extubation)
+
+#we sort if descendand
+cmo_extubation<-cmo_extubation[order(-cmo_extubation$subject_id,-unclass(cmo_extubation$charttime.extubation)), ]
+
+#we want only the last timestamp associated with the last hadm_id
+cmo_extubation<-cmo_extubation[!duplicated(cmo_extubation$hadm_id.cmo),]
+
+library(dplyr)
+cmo_extubation['hadm_id']<-
+  if_else(
+  cmo_extubation$hadm_id.extubation <= cmo_extubation$hadm_id.cmo,
+  cmo_extubation$hadm_id.cmo, cmo_extubation$hadm_id.extubation)
+
+cmo_extubation['time_ext_to_cmo_hrs']<-round((cmo_extubation$charttime.cmo - cmo_extubation$charttime.extubation)/3600,2)
+
+#let's reorder the dataset and select only those columns we need
+cmo_extubation<-cmo_extubation %>%
+  select(subject_id,hadm_id,icustay_id,charttime.extubation,charttime.cmo,time_ext_to_cmo_hrs )
+```
+
+## Deaths
+
+```{r}
+death_icu_or_hosp_query <-dbGetQuery(con,"select i.subject_id,i.hadm_id, i.icustay_id
+   , i.intime, i.outtime
+   , ad.deathtime
+   , extract(epoch from ad.deathtime-i.outtime)/60.0/60.0/24.0 as time_to_deathtime_days
+, p.dod
+   , extract(epoch from p.dod-date_trunc('day',i.outtime))/60.0/60.0/24.0 as time_to_dod_days
+, case when tr.intime = i.outtime then 1 else 0 end as icu_was_last_ward 
+--last ward means the patient last location of stay before discharge or death was the icu
+, case when extract(epoch from ad.deathtime-i.outtime)/60.0/60.0 < 2 then 1
+    when tr.intime = i.outtime and ad.deathtime is not null then 1
+    else 0 end as icu_mortality
+    ,ad.hospital_expire_flag as hosp_mortality
+     FROM
+      mimiciii.icustays i
+     inner join mimiciii.admissions ad on i.hadm_id = ad.hadm_id
+     inner join mimiciii.patients p on i.subject_id = p.subject_id
+     left join ( select hadm_id, intime, outtime, row_number() over (partition by hadm_id order by intime desc) rn from mimiciii.transfers where intime is not null ) tr
+    on i.hadm_id = tr.hadm_id
+    and tr.rn = 1
+    order by time_to_deathtime_days, time_to_dod_days
+")
+```
+
+# CMO, extubation and death
+
+```{r}
+detach("package:dplyr")
+library(dplyr)
+
+death_icu_or_hosp<-death_icu_or_hosp_query %>%
+  filter(icu_mortality==1 | hosp_mortality==1) %>%
+  select(subject_id, deathtime,icu_mortality,hosp_mortality) 
+
+#we sort if descendand
+death_icu_or_hosp<-death_icu_or_hosp[order(-death_icu_or_hosp$subject_id,-unclass(death_icu_or_hosp$deathtime)), ]
+
+#we want only the last timestamp associated with the last hadm_id
+death_icu_or_hosp<-death_icu_or_hosp[!duplicated(death_icu_or_hosp$subject_id),]
+
+cmo_and_extubation_and_death<-inner_join(cmo_extubation,death_icu_or_hosp)
+  
+```
+
+# CMO, extubation before death
+
+```{r}
+library(dplyr)
+cmo_and_extubation_and_death['time_from_ext_to_death_hrs']<-
+  round(difftime(cmo_and_extubation_and_death$deathtime
+           ,cmo_and_extubation_and_death$charttime.extubation
+           ,units = 'hours'),2)
+
+#converting to numeric
+cmo_and_extubation_and_death$time_from_ext_to_death_hrs<-round(as.double(cmo_and_extubation_and_death$time_from_ext_to_death_hrs),2)
+cmo_and_extubation_and_death$time_ext_to_cmo_hrs<-round(as.double(cmo_and_extubation_and_death$time_ext_to_cmo_hrs),2)
+
+# q<-plot_ly(x = cmo_and_extubation_and_death$time_from_ext_to_death_hrs, type = "histogram"
+#            ,autobinx=FALSE
+#            ,xbins=list(start=-14,end=30000,size=5))%>%
+#   layout(title='time_from_ext_to_death_hrs')
+# 
+# hist(as.numeric(cmo_and_extubation_and_death$time_from_ext_to_death_hrs))
+
+cmo_and_extubation_and_death[cmo_and_extubation_and_death$subject_id==90078,]$hadm_id<-163063
+
+cmo_and_extubation_and_death_24<-cmo_and_extubation_and_death%>%
+  filter(time_from_ext_to_death_hrs >= 0 & time_from_ext_to_death_hrs<=24)
+
+cmo_and_extubation_and_death_48<-cmo_and_extubation_and_death%>%
+  filter(time_from_ext_to_death_hrs >= 0 & time_from_ext_to_death_hrs<=48)
+
+```
+
+
+
+

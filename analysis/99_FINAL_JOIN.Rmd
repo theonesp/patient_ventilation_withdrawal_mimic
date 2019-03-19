@@ -1,0 +1,53 @@
+---
+title: "Final Join"
+author: "Miguel Angel Armengol de la Hoz"
+date: "August 1, 2018"
+output: html_document
+---
+
+# Libraries and data
+
+```{r}
+library(RPostgreSQL)
+library(DBI)
+library(dplyr)
+```
+
+## Data extraction
+
+### Final Dataset
+```{r}
+
+#Demographics joins
+final_dataset<-left_join(cmo_and_extubation_and_death_24, extubated_procedureevents_mv[, c('subject_id','extubated_in_procedureevents')])
+final_dataset<-left_join(final_dataset, demographics_all)
+final_dataset<-left_join(final_dataset, gcs_last_day)
+final_dataset<-left_join(final_dataset, vent_mode_last_pre_ext_final)
+final_dataset<-left_join(final_dataset, top15icd9_codes_with_labels_sumarized)
+final_dataset<-left_join(final_dataset,last_pao2fio2_patients_final)
+
+#Epochs joins
+final_dataset<-left_join(final_dataset,final_rr_te_epoch)
+final_dataset<-left_join(final_dataset, rr_from_patients_tofilter_first_final)
+final_dataset<-left_join(final_dataset,cohort_with_opioids_infusion_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_benzodiazepines_infusion_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_opioids_bolus_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_benzodiazepines_bolus_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_opioids_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_benzodiazepines_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_opioids_bolus_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_benzodiazepines_bolus_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_re_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_ps_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_min_rass_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_max_rass_epoch)
+
+
+library(foreign)
+write.dta(final_dataset, "final_dataset.dta")
+cat(names(final_dataset),sep = ',')
+#view(dfSummary(final_dataset))
+
+```
+
+

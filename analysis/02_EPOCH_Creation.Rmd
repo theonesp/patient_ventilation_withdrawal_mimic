@@ -1,0 +1,1358 @@
+---
+title: "Epoch Creation"
+author: "Miguel Angel Armengol de la Hoz"
+date: "August 1, 2018"
+output: html_document
+---
+
+# Libraries and SQL connection
+
+```{r}
+library(summarytools)
+library(bigrquery)
+#library(RPostgreSQL)
+library(DBI)
+library(reshape)
+library(dplyr)
+```
+
+# Getting the list of ids from our previously generated cohort.
+
+```{r}
+subject_ids_fromourcohort24<-cmo_and_extubation_and_death_24$subject_id
+subject_ids_fromourcohort24 <- toString(sprintf("%s", subject_ids_fromourcohort24)) 
+
+hadm_ids_fromourcohort24<-cmo_and_extubation_and_death_24$hadm_id
+hadm_ids_fromourcohort24 <- toString(sprintf("%s", hadm_ids_fromourcohort24)) 
+```
+
+
+## Tachypnea Detection Binary
+
+### Data extraction
+
+- ATENTION: FOR SOME REASON THE LIBRARY IS NOT EXTRACTING TIME FROM THE DATETIME, only the data so I used pgadmin and exporter in csv.
+- Extracting the data in csv was causing a lot of datetime to be NULL where importing them so I used Big Query.
+- Extracting the data in Big Query was chaning the timezone so it needed to be reseted.
+
+```{r}
+query<-paste0("
+SELECT
+  chartevents.subject_id,
+  chartevents.itemid,
+  COALESCE (storetime, chartevents.charttime )AS charttime_rr,
+  chartevents.valuenum
+From
+  `physionet-data.mimiciii_clinical.chartevents` chartevents
+WHERE
+  -- itemid = 220210 -- The most frequent RR item_id for our cohort
+chartevents.itemid IN (220210, 224688, 224689, 618, 224690, 619,224422,7884,224718,227050,6106,3142,615,1635,219,223851,3603,614,8113,1884,653)
+AND
+subject_id IN (",subject_ids_fromourcohort24,")
+AND 
+valuenum IS NOT NULL
+")
+
+#respiratory_rate<-dbGetQuery(con, query)
+respiratory_rate_charttime_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+# 822/822 patients with RR information
+```
+
+### Epochs Creation
+
+```{r}
+library(dplyr)
+rr_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[ ,c('subject_id','icustay_id','charttime.extubation','deathtime')]
+                                      ,respiratory_rate_charttime_cohort_24)
+
+
+# we noticed some timezones are alteterd, so we reset them
+rr_from_patients_tofilter$charttime_rr<-as.character(rr_from_patients_tofilter$charttime_rr)
+rr_from_patients_tofilter$charttime.extubation<-as.character(rr_from_patients_tofilter$charttime.extubation)
+rr_from_patients_tofilter$deathtime<-as.character(rr_from_patients_tofilter$deathtime)
+
+
+rr_from_patients_tofilter$charttime_rr<-as.POSIXct(rr_from_patients_tofilter$charttime_rr, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+rr_from_patients_tofilter$charttime.extubation<-as.POSIXct(rr_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+rr_from_patients_tofilter$deathtime<-as.POSIXct(rr_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+rr_from_patients_tofilter['timefrom_ext_to_rr_mins']<-difftime(rr_from_patients_tofilter$charttime_rr,rr_from_patients_tofilter$charttime.extubation,units = 'mins')
+
+# # Filtering begins
+#   
+# post_ext_rr_patients<-rr_from_patients_tofilter %>%
+#   filter( timefrom_ext_to_rr_mins >=0 )
+
+#data availability epochs
+
+#if there is no data in that epoch, write 0
+cohort_with_rr_epoch<-rr_from_patients_tofilter %>%
+  mutate(
+ rr_epoch_01=if_else(timefrom_ext_to_rr_mins>= 0 & timefrom_ext_to_rr_mins<=60,valuenum,NULL)
+,rr_epoch_02=if_else(timefrom_ext_to_rr_mins>60 & timefrom_ext_to_rr_mins<=120,valuenum,NULL)
+,rr_epoch_03=if_else(timefrom_ext_to_rr_mins>120 & timefrom_ext_to_rr_mins<=180,valuenum,NULL)
+,rr_epoch_04=if_else(timefrom_ext_to_rr_mins>180 & timefrom_ext_to_rr_mins<=240,valuenum,NULL)
+,rr_epoch_05=if_else(timefrom_ext_to_rr_mins>240 & timefrom_ext_to_rr_mins<=300,valuenum,NULL)
+,rr_epoch_06=if_else(timefrom_ext_to_rr_mins>300 & timefrom_ext_to_rr_mins<=360,valuenum,NULL)
+,rr_epoch_07=if_else(timefrom_ext_to_rr_mins>360 & timefrom_ext_to_rr_mins<=420,valuenum,NULL)
+,rr_epoch_08=if_else(timefrom_ext_to_rr_mins>420 & timefrom_ext_to_rr_mins<=480,valuenum,NULL)
+,rr_epoch_09=if_else(timefrom_ext_to_rr_mins>480 & timefrom_ext_to_rr_mins<=540,valuenum,NULL)
+,rr_epoch_10=if_else(timefrom_ext_to_rr_mins>540 & timefrom_ext_to_rr_mins<=600,valuenum,NULL)
+,rr_epoch_11=if_else(timefrom_ext_to_rr_mins>600 & timefrom_ext_to_rr_mins<=660,valuenum,NULL)
+,rr_epoch_12=if_else(timefrom_ext_to_rr_mins>660 & timefrom_ext_to_rr_mins<=720,valuenum,NULL)
+    )
+
+view(dfSummary(cohort_with_rr_epoch))
+
+my.max <- function(x) ifelse( !all(is.na(x)), max(x, na.rm=T), NA)
+
+cohort_with_rr_epoch<-cohort_with_rr_epoch%>%
+select(subject_id,rr_epoch_01,rr_epoch_02,rr_epoch_03,rr_epoch_04,rr_epoch_05,rr_epoch_06,rr_epoch_07,rr_epoch_08,rr_epoch_09,rr_epoch_10,rr_epoch_11,rr_epoch_12)%>%
+  group_by(subject_id)%>%
+  dplyr::summarize_all(my.max)
+
+view(dfSummary(cohort_with_rr_epoch))
+
+
+#0 means missing so replace 0 with NA
+cohort_with_rr_epoch[cohort_with_rr_epoch==0]<-NA
+
+#view(dfSummary(cohort_with_rr_epoch))
+
+# Filtering begins
+  
+post_ext_rr_patients<-rr_from_patients_tofilter %>%
+  filter(timefrom_ext_to_rr_mins > 0 )  
+
+n_distinct(post_ext_rr_patients$subject_id) 
+#771 patients have rr data after ext
+
+tachypnea_patients<-post_ext_rr_patients%>%
+  filter(valuenum >= 30 & valuenum< 60)
+n_distinct(tachypnea_patients$subject_id) 
+#248 patients have tachypnea
+
+cohort_with_te_epoch<-rr_from_patients_tofilter %>% 
+mutate(
+ te_epoch_01=case_when(timefrom_ext_to_rr_mins>= 0 & timefrom_ext_to_rr_mins<=60 & valuenum >= 30 & valuenum <60 ~ 1
+,timefrom_ext_to_rr_mins>= 0 & timefrom_ext_to_rr_mins<=60 ~ 0 
+)
+,te_epoch_02=case_when(timefrom_ext_to_rr_mins>60 & timefrom_ext_to_rr_mins<=120 & valuenum >= 30 & valuenum <60  ~ 1 
+,timefrom_ext_to_rr_mins>60 & timefrom_ext_to_rr_mins<=120 ~ 0  
+)
+,te_epoch_03=case_when(timefrom_ext_to_rr_mins>120 & timefrom_ext_to_rr_mins<=180 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>120 & timefrom_ext_to_rr_mins<=180 ~ 0  
+)
+,te_epoch_04=case_when(timefrom_ext_to_rr_mins>180 & timefrom_ext_to_rr_mins<=240 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>180 & timefrom_ext_to_rr_mins<=240 ~ 0  
+)
+,te_epoch_05=case_when(timefrom_ext_to_rr_mins>240 & timefrom_ext_to_rr_mins<=300 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>240 & timefrom_ext_to_rr_mins<=300 ~ 0  
+)  
+,te_epoch_06=case_when(timefrom_ext_to_rr_mins>300 & timefrom_ext_to_rr_mins<=360 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>300 & timefrom_ext_to_rr_mins<=360 ~ 0  
+)
+,te_epoch_07=case_when(timefrom_ext_to_rr_mins>360 & timefrom_ext_to_rr_mins<=420 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>360 & timefrom_ext_to_rr_mins<=420 ~ 0  
+)
+,te_epoch_08=case_when(timefrom_ext_to_rr_mins>420 & timefrom_ext_to_rr_mins<=480 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>420 & timefrom_ext_to_rr_mins<=480 ~ 0  
+)
+,te_epoch_09=case_when(timefrom_ext_to_rr_mins>480 & timefrom_ext_to_rr_mins<=540 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>480 & timefrom_ext_to_rr_mins<=540 ~ 0  
+)
+,te_epoch_10=case_when(timefrom_ext_to_rr_mins>540 & timefrom_ext_to_rr_mins<=600 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>540 & timefrom_ext_to_rr_mins<=600 ~ 0  
+)
+,te_epoch_11=case_when(timefrom_ext_to_rr_mins>600 & timefrom_ext_to_rr_mins<=660 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>600 & timefrom_ext_to_rr_mins<=660 ~ 0  
+)
+,te_epoch_12=case_when(timefrom_ext_to_rr_mins>660 & timefrom_ext_to_rr_mins<=720 & valuenum >= 30 & valuenum <60  ~ 1
+,timefrom_ext_to_rr_mins>660 & timefrom_ext_to_rr_mins<=720 ~ 0  
+)  
+)
+
+#view(dfSummary(cohort_with_te_epoch))
+
+#this function returns NA only when all elements summed are NA
+suma = function(x) if (all(is.na(x))) x[NA_integer_] else sum(x, na.rm = TRUE)
+
+cohort_with_te_epoch<-cohort_with_te_epoch%>%
+select(subject_id,te_epoch_01,te_epoch_02,te_epoch_03,te_epoch_04,te_epoch_05,te_epoch_06,te_epoch_07,te_epoch_08,te_epoch_09,te_epoch_10,te_epoch_11,te_epoch_12)%>%
+group_by(subject_id)%>%
+summarize_all(suma)
+
+#view(dfSummary(cohort_with_te_epoch))
+
+
+
+# Creating binary columns
+subject_ids_fromourcohort24<-as.data.frame(cmo_and_extubation_and_death_24$subject_id)
+colnames(subject_ids_fromourcohort24)<-'subject_id'
+
+final_rr_te_epoch<-left_join(subject_ids_fromourcohort24, cohort_with_rr_epoch)
+final_rr_te_epoch<-left_join(final_rr_te_epoch,cohort_with_te_epoch)
+
+
+
+final_rr_te_epoch<-final_rr_te_epoch%>%
+  mutate(has_rr_data=if_else(subject_id %in% respiratory_rate_charttime_cohort_24$subject_id,1,0))%>%
+  mutate(has_postext_rr_data=if_else(subject_id %in% post_ext_rr_patients$subject_id,1,0))%>%
+  mutate(has_postext_tachypnea=if_else(subject_id %in% tachypnea_patients$subject_id,1,0))
+
+#Create another dataset for data availability per epoch (all rr, not only te)
+
+view(dfSummary(final_rr_te_epoch))
+
+
+```
+
+### Freq distribution of granularity
+
+```{r}
+#we order them before applying the lag
+tachypnea_patients<-tachypnea_patients%>%arrange(subject_id,charttime_rr)
+
+#we use the lag for calulating the resolution
+tachypnea_patients<-tachypnea_patients%>% group_by(subject_id) %>% mutate(lagged_charttime_rr = lag(charttime_rr))  
+tachypnea_patients['charttime_rr_resolution_min']<-(tachypnea_patients$charttime_rr-tachypnea_patients$lagged_charttime_rr)/60
+
+```
+
+### First postext tachypnea episode time
+
+"has post extubation tachypnea episode" with variable to contain the time to event value. 
+ (only the first one counts) 
+
+```{r}
+rr_from_patients_tofilter_first<-rr_from_patients_tofilter%>%filter(
+    timefrom_ext_to_rr_mins >=0 & valuenum >=30
+)
+
+rr_from_patients_tofilter_first<-rr_from_patients_tofilter_first %>%arrange(subject_id,timefrom_ext_to_rr_mins)
+
+rr_from_patients_tofilter_first_final<-rr_from_patients_tofilter_first[!duplicated(rr_from_patients_tofilter_first$subject_id),] 
+
+rr_from_patients_tofilter_first_final<-rr_from_patients_tofilter_first_final%>%
+  select(subject_id,charttime_rr,timefrom_ext_to_rr_mins)
+rr_from_patients_tofilter_first_final<-dplyr::rename(rr_from_patients_tofilter_first_final,
+                                              charttime_first_te=charttime_rr,
+                                      timefrom_ext_to_first_te_mins=timefrom_ext_to_rr_mins)
+```
+
+# DRUGS POSITIVE EPOCHS
+
+## Drugs Epoch Values Positive
+
+* 225154 Morphine Sulfate
+* 221744 Fentanyl
+* 221668 Midazolam
+* 221385 Ativan (Lorazepam)
+
+opioids =  1 milligram of morphine(ref) IV (225154) is equivalent to .01mg Fentanyl IV (221744).
+benzodiazepines = 1 milligram of lorazepam (ativan)(ref) IV is equivalent to 2 mg midazolam IV. 
+Ref= Barr J, Zomorodi K, Bertaccini EJ, et al. A double-blind, randomized comparison of i.v. lorazepam versus midazolam for sedation of ICU patients via a pharmacologic model. Anesthesiology. 2001 Aug;95(2):286-98. PMID 11506097
+
+
+
+### Infusion Drugs
+
+#### Opioids
+
+##### Data extraction
+
+```{r eval=FALSE, include=FALSE}
+query<-"
+SELECT
+  inputevents_mv.subject_id,
+  inputevents_mv.hadm_id,
+  inputevents_mv.icustay_id,
+  inputevents_mv.itemid,
+  COALESCE(inputevents_mv.storetime,inputevents_mv.starttime) AS charttime_drugs_infusion,
+  inputevents_mv.rate,
+  inputevents_mv.rateuom,
+  inputevents_mv.ordercategorydescription
+From
+  `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
+    
+WHERE
+  inputevents_mv.itemid In (225154,221744)
+  AND ordercategorydescription = 'Continuous Med'
+ "
+
+
+# AND subject_id IN (" , subject_ids_fromourcohort24, "
+
+opioids_infusion_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+opioids_infusion_cohort_24$itemid[opioids_infusion_cohort_24$itemid==225154]<-'Morphine'
+opioids_infusion_cohort_24$itemid[opioids_infusion_cohort_24$itemid==221744]<-'Fentanyl'
+# in case we don't have enough add DILAUDID (hydromorphone)
+# we tried hydromorphone and it increased in less than 10 the number of patients 1/7/18
+```
+
+##### Units equivalence
+
+opioids =  1 milligram of morphine(ref) IV (225154) is equivalent to .01mg Fentanyl IV (221744).
+1 mcg of morphine = 0.001 mg of morphine
+1 mcg of fentanyl = 0.1 mg of morphine
+1 mg of fentanyl = 100 mg of morphine
+
+```{r}
+#nested if else function
+
+i <- function(if_stat, then) {
+  if_stat <- lazyeval::expr_text(if_stat)
+  then    <- lazyeval::expr_text(then)
+  sprintf("ifelse(%s, %s, ", if_stat, then)
+}
+
+e <- function(else_ret) {
+  else_ret <- lazyeval::expr_text(else_ret)
+  else_ret
+}
+
+ie <- function(...) {
+  args <- list(...)
+  
+  for (i in 1:(length(args) - 1) ) {
+      if (substr(args[[i]], 1, 6) != "ifelse") {
+        stop("All but the last argument, need to be i functions.", call. = FALSE)
+      }
+  }
+  if (substr(args[[length(args)]], 1, 6) == "ifelse"){
+    stop("Last argument needs to be an e function.", call. = FALSE)
+  }
+  args$final <- paste(rep(')', length(args) - 1), collapse = '')
+  eval_string <- do.call('paste', args)
+  eval(parse(text = eval_string))
+}
+
+opioids_infusion_cohort_24['opioid_rate']<-NA
+# * 225154 Morphine Sulfate
+# * 221744 Fentanyl
+opioids_infusion_cohort_24$opioid_rate <- 
+  ie(
+    # 1 mcg of morphine = 0.001 mg of morphine
+    i(opioids_infusion_cohort_24$itemid=='Morphine' & opioids_infusion_cohort_24$rateuom=='mcg/hour',round(opioids_infusion_cohort_24$rate*0.001,2)),
+    #1 mcg of fentanyl = 0.1 mg of morphine
+    i(opioids_infusion_cohort_24$itemid=='Fentanyl' & opioids_infusion_cohort_24$rateuom=='mcg/hour',round(opioids_infusion_cohort_24$rate*0.1,2)),
+    #1 mg of fentanyl = 100 mg of morphine
+    i(opioids_infusion_cohort_24$itemid=='Fentanyl' & opioids_infusion_cohort_24$rateuom=='mg/hour',round(opioids_infusion_cohort_24$rate*100,2)),
+    
+    e(round(opioids_infusion_cohort_24$rate,2))
+  )
+```
+
+
+##### Epochs Creation (max rate mg/h)
+
+```{r eval=FALSE, include=FALSE}
+library(dplyr)
+opioids_infusion_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], opioids_infusion_cohort_24)
+
+# we noticed some timezones are alteterd, so we reset them
+opioids_infusion_from_patients_tofilter$charttime_drugs_infusion<-as.character(opioids_infusion_from_patients_tofilter$charttime_drugs_infusion)
+opioids_infusion_from_patients_tofilter$charttime.extubation<-as.character(opioids_infusion_from_patients_tofilter$charttime.extubation)
+opioids_infusion_from_patients_tofilter$deathtime<-as.character(opioids_infusion_from_patients_tofilter$deathtime)
+
+opioids_infusion_from_patients_tofilter$charttime_drugs_infusion<-as.POSIXct(opioids_infusion_from_patients_tofilter$charttime_drugs_infusion, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+opioids_infusion_from_patients_tofilter$charttime.extubation<-as.POSIXct(opioids_infusion_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+opioids_infusion_from_patients_tofilter$deathtime<-as.POSIXct(opioids_infusion_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+opioids_infusion_from_patients_tofilter['time_from_ext_to_opioids_infusion_min']<-difftime(opioids_infusion_from_patients_tofilter$charttime_drugs_infusion,opioids_infusion_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+#Drug Push is Bolus, so I filtered them out
+opioids_infusion_after_ext<-opioids_infusion_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_opioids_infusion_min >=0 
+          )
+
+# opioids =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(opioids_infusion_after_ext$subject_id) 
+# 545 patients with time_from_ext_to_opioids_infusion_min >=-12*60 1/7/18
+# 451 patients with time_from_ext_to_opioids_infusion_min >=0 2/13/19
+
+library(dplyr)
+## if(any(gdrugs_infusionpl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+cohort_with_opioids_infusion_epoch<-opioids_infusion_after_ext %>%
+  mutate(
+ opioids_infusion_epoch_01=if_else(time_from_ext_to_opioids_infusion_min>=0 & time_from_ext_to_opioids_infusion_min<=60,opioid_rate,NULL)
+,opioids_infusion_epoch_02=if_else(time_from_ext_to_opioids_infusion_min>60 & time_from_ext_to_opioids_infusion_min<=120,opioid_rate,NULL)
+,opioids_infusion_epoch_03=if_else(time_from_ext_to_opioids_infusion_min>120 & time_from_ext_to_opioids_infusion_min<=180,opioid_rate,NULL)
+,opioids_infusion_epoch_04=if_else(time_from_ext_to_opioids_infusion_min>180 & time_from_ext_to_opioids_infusion_min<=240,opioid_rate,NULL)
+,opioids_infusion_epoch_05=if_else(time_from_ext_to_opioids_infusion_min>240 & time_from_ext_to_opioids_infusion_min<=300,opioid_rate,NULL)
+,opioids_infusion_epoch_06=if_else(time_from_ext_to_opioids_infusion_min>300 & time_from_ext_to_opioids_infusion_min<=360,opioid_rate,NULL)
+,opioids_infusion_epoch_07=if_else(time_from_ext_to_opioids_infusion_min>360 & time_from_ext_to_opioids_infusion_min<=420,opioid_rate,NULL)
+,opioids_infusion_epoch_08=if_else(time_from_ext_to_opioids_infusion_min>420 & time_from_ext_to_opioids_infusion_min<=480,opioid_rate,NULL)
+,opioids_infusion_epoch_09=if_else(time_from_ext_to_opioids_infusion_min>480 & time_from_ext_to_opioids_infusion_min<=540,opioid_rate,NULL)
+,opioids_infusion_epoch_10=if_else(time_from_ext_to_opioids_infusion_min>540 & time_from_ext_to_opioids_infusion_min<=600,opioid_rate,NULL)
+,opioids_infusion_epoch_11=if_else(time_from_ext_to_opioids_infusion_min>600 & time_from_ext_to_opioids_infusion_min<=660,opioid_rate,NULL)
+,opioids_infusion_epoch_12=if_else(time_from_ext_to_opioids_infusion_min>660 & time_from_ext_to_opioids_infusion_min<=720,opioid_rate,NULL)
+    )
+
+
+cohort_with_opioids_infusion_epoch<-cohort_with_opioids_infusion_epoch%>%
+  select(subject_id,opioids_infusion_epoch_01,opioids_infusion_epoch_02,opioids_infusion_epoch_03,opioids_infusion_epoch_04,opioids_infusion_epoch_05,opioids_infusion_epoch_06,opioids_infusion_epoch_07,opioids_infusion_epoch_08,opioids_infusion_epoch_09,opioids_infusion_epoch_10,opioids_infusion_epoch_11,opioids_infusion_epoch_12)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarise_all(my.max)
+```
+
+#### Benzodiazepines
+
+##### Data extraction
+
+```{r eval=FALSE, include=FALSE}
+query<-"
+SELECT
+  inputevents_mv.subject_id,
+  inputevents_mv.hadm_id,
+  inputevents_mv.icustay_id,
+  inputevents_mv.itemid,
+  COALESCE(inputevents_mv.storetime,inputevents_mv.starttime) AS charttime_drugs_infusion,
+  inputevents_mv.rate,
+  inputevents_mv.rateuom,
+  inputevents_mv.ordercategorydescription
+From
+  `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
+    
+WHERE
+  inputevents_mv.itemid In (221668,221385,221623)
+  AND ordercategorydescription = 'Continuous Med'
+"
+
+benzodiazepines_infusion_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+benzodiazepines_infusion_cohort_24$itemid[benzodiazepines_infusion_cohort_24$itemid==221668]<-'Midazolam'
+benzodiazepines_infusion_cohort_24$itemid[benzodiazepines_infusion_cohort_24$itemid==221385]<-'Ativan'
+#Valium (Diazepam)
+#We tried valium and it didn't increase the number of patients, still 84 after ext
+```
+
+##### Units equivalence
+
+benzodiazepines = 1 milligram of lorazepam (ativan)(ref) IV is equivalent to 2 mg midazolam IV. 
+1 mg of midazolam = 0.5 mg of Ativan
+
+
+```{r}
+#nested if else function
+
+i <- function(if_stat, then) {
+  if_stat <- lazyeval::expr_text(if_stat)
+  then    <- lazyeval::expr_text(then)
+  sprintf("ifelse(%s, %s, ", if_stat, then)
+}
+
+e <- function(else_ret) {
+  else_ret <- lazyeval::expr_text(else_ret)
+  else_ret
+}
+
+ie <- function(...) {
+  args <- list(...)
+  
+  for (i in 1:(length(args) - 1) ) {
+      if (substr(args[[i]], 1, 6) != "ifelse") {
+        stop("All but the last argument, need to be i functions.", call. = FALSE)
+      }
+  }
+  if (substr(args[[length(args)]], 1, 6) == "ifelse"){
+    stop("Last argument needs to be an e function.", call. = FALSE)
+  }
+  args$final <- paste(rep(')', length(args) - 1), collapse = '')
+  eval_string <- do.call('paste', args)
+  eval(parse(text = eval_string))
+}
+
+
+
+benzodiazepines_infusion_cohort_24['opioid_rate']<-NA
+benzodiazepines_infusion_cohort_24$opioid_rate <- 
+  ie(
+#1 mg of midazolam = 0.5 mg of Ativan
+    i(benzodiazepines_infusion_cohort_24$itemid=='Midazolam',round(benzodiazepines_infusion_cohort_24$rate*0.5,2)),
+    e(round(benzodiazepines_infusion_cohort_24$rate,2))
+  )
+```
+
+
+##### Epochs Creation (max rate mg/h)
+
+```{r eval=FALSE, include=FALSE}
+benzodiazepines_infusion_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], benzodiazepines_infusion_cohort_24)
+
+# we noticed some timezones adrugs_infusion alteterd, so we drugs_infusionset them
+benzodiazepines_infusion_from_patients_tofilter$charttime_drugs_infusion<-as.character(benzodiazepines_infusion_from_patients_tofilter$charttime_drugs_infusion)
+benzodiazepines_infusion_from_patients_tofilter$charttime.extubation<-as.character(benzodiazepines_infusion_from_patients_tofilter$charttime.extubation)
+benzodiazepines_infusion_from_patients_tofilter$deathtime<-as.character(benzodiazepines_infusion_from_patients_tofilter$deathtime)
+
+
+benzodiazepines_infusion_from_patients_tofilter$charttime_drugs_infusion<-as.POSIXct(benzodiazepines_infusion_from_patients_tofilter$charttime_drugs_infusion, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+benzodiazepines_infusion_from_patients_tofilter$charttime.extubation<-as.POSIXct(benzodiazepines_infusion_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+benzodiazepines_infusion_from_patients_tofilter$deathtime<-as.POSIXct(benzodiazepines_infusion_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+benzodiazepines_infusion_from_patients_tofilter['time_from_ext_to_benzodiazepines_infusion_min']<-difftime(benzodiazepines_infusion_from_patients_tofilter$charttime_drugs_infusion,benzodiazepines_infusion_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+#Drug Push is Bolus, so I filtered them out
+benzodiazepines_infusion_after_ext<-benzodiazepines_infusion_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_benzodiazepines_infusion_min >=0 
+          )
+
+# benzodiazepines =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(benzodiazepines_infusion_after_ext$subject_id) #84 patients 1/7/18
+
+library(dplyr)
+## if(any(gdrugs_infusionpl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+cohort_with_benzodiazepines_infusion_epoch<-benzodiazepines_infusion_after_ext %>%
+  mutate(
+ benzodiazepines_infusion_epoch_01=if_else(time_from_ext_to_benzodiazepines_infusion_min>=0 & time_from_ext_to_benzodiazepines_infusion_min<=60,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_02=if_else(time_from_ext_to_benzodiazepines_infusion_min>60 & time_from_ext_to_benzodiazepines_infusion_min<=120,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_03=if_else(time_from_ext_to_benzodiazepines_infusion_min>120 & time_from_ext_to_benzodiazepines_infusion_min<=180,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_04=if_else(time_from_ext_to_benzodiazepines_infusion_min>180 & time_from_ext_to_benzodiazepines_infusion_min<=240,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_05=if_else(time_from_ext_to_benzodiazepines_infusion_min>240 & time_from_ext_to_benzodiazepines_infusion_min<=300,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_06=if_else(time_from_ext_to_benzodiazepines_infusion_min>300 & time_from_ext_to_benzodiazepines_infusion_min<=360,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_07=if_else(time_from_ext_to_benzodiazepines_infusion_min>360 & time_from_ext_to_benzodiazepines_infusion_min<=420,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_08=if_else(time_from_ext_to_benzodiazepines_infusion_min>420 & time_from_ext_to_benzodiazepines_infusion_min<=480,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_09=if_else(time_from_ext_to_benzodiazepines_infusion_min>480 & time_from_ext_to_benzodiazepines_infusion_min<=540,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_10=if_else(time_from_ext_to_benzodiazepines_infusion_min>540 & time_from_ext_to_benzodiazepines_infusion_min<=600,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_11=if_else(time_from_ext_to_benzodiazepines_infusion_min>600 & time_from_ext_to_benzodiazepines_infusion_min<=660,opioid_rate,NULL)
+,benzodiazepines_infusion_epoch_12=if_else(time_from_ext_to_benzodiazepines_infusion_min>660 & time_from_ext_to_benzodiazepines_infusion_min<=720,opioid_rate,NULL)
+    )
+
+
+cohort_with_benzodiazepines_infusion_epoch<-cohort_with_benzodiazepines_infusion_epoch%>%
+  select(subject_id,benzodiazepines_infusion_epoch_01,benzodiazepines_infusion_epoch_02,benzodiazepines_infusion_epoch_03,benzodiazepines_infusion_epoch_04,benzodiazepines_infusion_epoch_05,benzodiazepines_infusion_epoch_06,benzodiazepines_infusion_epoch_07,benzodiazepines_infusion_epoch_08,benzodiazepines_infusion_epoch_09,benzodiazepines_infusion_epoch_10,benzodiazepines_infusion_epoch_11,benzodiazepines_infusion_epoch_12)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarise_all(my.max)
+```
+
+### Bolus Drugs
+
+
+#### Opioids
+
+##### Data extraction
+
+```{r eval=FALSE, include=FALSE}
+query<-"
+SELECT
+  inputevents_mv.subject_id,
+  inputevents_mv.hadm_id,
+  inputevents_mv.icustay_id,
+  inputevents_mv.itemid,
+  COALESCE(inputevents_mv.storetime,inputevents_mv.starttime) AS charttime_drugs_bolus,
+  inputevents_mv.amount,
+  inputevents_mv.amountuom,
+  inputevents_mv.ordercategorydescription
+From
+  `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
+    
+WHERE
+  inputevents_mv.itemid In (225154,221744)
+  AND ordercategorydescription = 'Drug Push' "
+
+opioids_bolus_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+opioids_bolus_cohort_24$itemid[opioids_bolus_cohort_24$itemid==225154]<-'Morphine'
+opioids_bolus_cohort_24$itemid[opioids_bolus_cohort_24$itemid==221744]<-'Fentanyl'
+```
+
+##### Units equivalence
+
+opioids =  1 milligram of morphine(ref) IV (225154) is equivalent to .01mg Fentanyl IV (221744).
+1 mcg of morphine = 0.001 mg of morphine
+1 mcg of fentanyl = 0.1 mg of morphine
+1 mg of fentanyl = 100 mg of morphine
+
+```{r}
+#nested if else function
+
+i <- function(if_stat, then) {
+  if_stat <- lazyeval::expr_text(if_stat)
+  then    <- lazyeval::expr_text(then)
+  sprintf("ifelse(%s, %s, ", if_stat, then)
+}
+
+e <- function(else_ret) {
+  else_ret <- lazyeval::expr_text(else_ret)
+  else_ret
+}
+
+ie <- function(...) {
+  args <- list(...)
+  
+  for (i in 1:(length(args) - 1) ) {
+      if (substr(args[[i]], 1, 6) != "ifelse") {
+        stop("All but the last argument, need to be i functions.", call. = FALSE)
+      }
+  }
+  if (substr(args[[length(args)]], 1, 6) == "ifelse"){
+    stop("Last argument needs to be an e function.", call. = FALSE)
+  }
+  args$final <- paste(rep(')', length(args) - 1), collapse = '')
+  eval_string <- do.call('paste', args)
+  eval(parse(text = eval_string))
+}
+
+opioids_bolus_cohort_24['opioid_amount']<-NA
+# * 225154 Morphine Sulfate
+# * 221744 Fentanyl
+opioids_bolus_cohort_24$opioid_amount <- 
+  ie(
+    # 1 mcg of morphine = 0.001 mg of morphine
+    i(opioids_bolus_cohort_24$itemid=='Morphine' & opioids_bolus_cohort_24$amountuom=='mcg',round(opioids_bolus_cohort_24$amount*0.001,2)),
+    #1 mcg of fentanyl = 0.1 mg of morphine
+    i(opioids_bolus_cohort_24$itemid=='Fentanyl' & opioids_bolus_cohort_24$amountuom=='mcg',round(opioids_bolus_cohort_24$amount*0.1,2)),
+    #1 mg of fentanyl = 100 mg of morphine
+    i(opioids_bolus_cohort_24$itemid=='Fentanyl' & opioids_bolus_cohort_24$amountuom=='mg',round(opioids_bolus_cohort_24$amount*100,2)),
+    
+    e(round(opioids_bolus_cohort_24$amount,2))
+  )
+```
+
+
+##### Epochs Creation (total amount mg)
+
+```{r eval=FALSE, include=FALSE}
+library(dplyr)
+opioids_bolus_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], opioids_bolus_cohort_24)
+
+# we noticed some timezones adrugs_bolus alteterd, so we drugs_bolusset them
+opioids_bolus_from_patients_tofilter$charttime_drugs_bolus<-as.character(opioids_bolus_from_patients_tofilter$charttime_drugs_bolus)
+opioids_bolus_from_patients_tofilter$charttime.extubation<-as.character(opioids_bolus_from_patients_tofilter$charttime.extubation)
+opioids_bolus_from_patients_tofilter$deathtime<-as.character(opioids_bolus_from_patients_tofilter$deathtime)
+
+
+opioids_bolus_from_patients_tofilter$charttime_drugs_bolus<-as.POSIXct(opioids_bolus_from_patients_tofilter$charttime_drugs_bolus, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+opioids_bolus_from_patients_tofilter$charttime.extubation<-as.POSIXct(opioids_bolus_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+opioids_bolus_from_patients_tofilter$deathtime<-as.POSIXct(opioids_bolus_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+opioids_bolus_from_patients_tofilter['time_from_ext_to_opioids_bolus_min']<-difftime(opioids_bolus_from_patients_tofilter$charttime_drugs_bolus,opioids_bolus_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+#Drug Push is Bolus, so I filtered them out
+opioids_bolus_after_ext<-opioids_bolus_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_opioids_bolus_min >=0 
+          )
+
+# opioids =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(opioids_bolus_after_ext$subject_id) 
+# 355 patients with time_from_ext_to_opioids_bolus_min >=-2*60 1/7/18
+# 322 patients with time_from_ext_to_opioids_bolus_min >=0 2/12/19
+
+
+library(dplyr)
+## if(any(gdrugs_boluspl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+cohort_with_opioids_bolus_epoch<-opioids_bolus_after_ext %>%
+  mutate(
+ opioids_bolus_epoch_01=if_else(time_from_ext_to_opioids_bolus_min>=0 & time_from_ext_to_opioids_bolus_min<=60,opioid_amount,NULL)
+,opioids_bolus_epoch_02=if_else(time_from_ext_to_opioids_bolus_min>60 & time_from_ext_to_opioids_bolus_min<=120,opioid_amount,NULL)
+,opioids_bolus_epoch_03=if_else(time_from_ext_to_opioids_bolus_min>120 & time_from_ext_to_opioids_bolus_min<=180,opioid_amount,NULL)
+,opioids_bolus_epoch_04=if_else(time_from_ext_to_opioids_bolus_min>180 & time_from_ext_to_opioids_bolus_min<=240,opioid_amount,NULL)
+,opioids_bolus_epoch_05=if_else(time_from_ext_to_opioids_bolus_min>240 & time_from_ext_to_opioids_bolus_min<=300,opioid_amount,NULL)
+,opioids_bolus_epoch_06=if_else(time_from_ext_to_opioids_bolus_min>300 & time_from_ext_to_opioids_bolus_min<=360,opioid_amount,NULL)
+,opioids_bolus_epoch_07=if_else(time_from_ext_to_opioids_bolus_min>360 & time_from_ext_to_opioids_bolus_min<=420,opioid_amount,NULL)
+,opioids_bolus_epoch_08=if_else(time_from_ext_to_opioids_bolus_min>420 & time_from_ext_to_opioids_bolus_min<=480,opioid_amount,NULL)
+,opioids_bolus_epoch_09=if_else(time_from_ext_to_opioids_bolus_min>480 & time_from_ext_to_opioids_bolus_min<=540,opioid_amount,NULL)
+,opioids_bolus_epoch_10=if_else(time_from_ext_to_opioids_bolus_min>540 & time_from_ext_to_opioids_bolus_min<=600,opioid_amount,NULL)
+,opioids_bolus_epoch_11=if_else(time_from_ext_to_opioids_bolus_min>600 & time_from_ext_to_opioids_bolus_min<=660,opioid_amount,NULL)
+,opioids_bolus_epoch_12=if_else(time_from_ext_to_opioids_bolus_min>660 & time_from_ext_to_opioids_bolus_min<=720,opioid_amount,NULL)
+    )
+
+my.sum <- function(x) ifelse( !all(is.na(x)), sum(x, na.rm=T), NA)
+
+cohort_with_opioids_bolus_epoch<-cohort_with_opioids_bolus_epoch%>%
+  select(subject_id,opioids_bolus_epoch_01,opioids_bolus_epoch_02,opioids_bolus_epoch_03,opioids_bolus_epoch_04,opioids_bolus_epoch_05,opioids_bolus_epoch_06,opioids_bolus_epoch_07,opioids_bolus_epoch_08,opioids_bolus_epoch_09,opioids_bolus_epoch_10,opioids_bolus_epoch_11,opioids_bolus_epoch_12)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarise_all(my.sum)
+```
+
+#### Benzodiazepines
+
+##### Data extraction
+
+```{r eval=FALSE, include=FALSE}
+query<-"
+SELECT
+  inputevents_mv.subject_id,
+  inputevents_mv.hadm_id,
+  inputevents_mv.icustay_id,
+  inputevents_mv.itemid,
+  COALESCE(inputevents_mv.storetime,inputevents_mv.starttime) AS charttime_drugs_bolus,
+  inputevents_mv.amount,
+  inputevents_mv.amountuom,
+  inputevents_mv.ordercategorydescription
+From
+  `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
+    
+WHERE
+  inputevents_mv.itemid In (221668,221385)
+  AND ordercategorydescription = 'Drug Push'"
+
+benzodiazepines_bolus_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+benzodiazepines_bolus_cohort_24$itemid[benzodiazepines_bolus_cohort_24$itemid==221668]<-'Midazolam'
+benzodiazepines_bolus_cohort_24$itemid[benzodiazepines_bolus_cohort_24$itemid==221385]<-'Ativan'
+
+```
+
+##### Units equivalence
+
+benzodiazepines = 1 milligram of lorazepam (ativan)(ref) IV is equivalent to 2 mg midazolam IV. 
+1 mg of midazolam = 0.5 mg of Ativan
+
+
+```{r}
+#nested if else function
+
+i <- function(if_stat, then) {
+  if_stat <- lazyeval::expr_text(if_stat)
+  then    <- lazyeval::expr_text(then)
+  sprintf("ifelse(%s, %s, ", if_stat, then)
+}
+
+e <- function(else_ret) {
+  else_ret <- lazyeval::expr_text(else_ret)
+  else_ret
+}
+
+ie <- function(...) {
+  args <- list(...)
+  
+  for (i in 1:(length(args) - 1) ) {
+      if (substr(args[[i]], 1, 6) != "ifelse") {
+        stop("All but the last argument, need to be i functions.", call. = FALSE)
+      }
+  }
+  if (substr(args[[length(args)]], 1, 6) == "ifelse"){
+    stop("Last argument needs to be an e function.", call. = FALSE)
+  }
+  args$final <- paste(rep(')', length(args) - 1), collapse = '')
+  eval_string <- do.call('paste', args)
+  eval(parse(text = eval_string))
+}
+
+
+
+benzodiazepines_bolus_cohort_24['opioid_amount']<-NA
+benzodiazepines_bolus_cohort_24$opioid_amount <- 
+  ie(
+#1 mg of midazolam = 0.5 mg of Ativan
+    i(benzodiazepines_bolus_cohort_24$itemid=='Midazolam',round(benzodiazepines_bolus_cohort_24$amount*0.5,2)),
+    e(round(benzodiazepines_bolus_cohort_24$amount,2))
+  )
+```
+
+
+##### Epochs Creation (total amount mg/h)
+
+```{r eval=FALSE, include=FALSE}
+library(dplyr)
+benzodiazepines_bolus_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], benzodiazepines_bolus_cohort_24)
+
+# we noticed some timezones adrugs_bolus alteterd, so we drugs_bolusset them
+benzodiazepines_bolus_from_patients_tofilter$charttime_drugs_bolus<-as.character(benzodiazepines_bolus_from_patients_tofilter$charttime_drugs_bolus)
+benzodiazepines_bolus_from_patients_tofilter$charttime.extubation<-as.character(benzodiazepines_bolus_from_patients_tofilter$charttime.extubation)
+benzodiazepines_bolus_from_patients_tofilter$deathtime<-as.character(benzodiazepines_bolus_from_patients_tofilter$deathtime)
+
+
+benzodiazepines_bolus_from_patients_tofilter$charttime_drugs_bolus<-as.POSIXct(benzodiazepines_bolus_from_patients_tofilter$charttime_drugs_bolus, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+benzodiazepines_bolus_from_patients_tofilter$charttime.extubation<-as.POSIXct(benzodiazepines_bolus_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+benzodiazepines_bolus_from_patients_tofilter$deathtime<-as.POSIXct(benzodiazepines_bolus_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+benzodiazepines_bolus_from_patients_tofilter['time_from_ext_to_benzodiazepines_bolus_min']<-difftime(benzodiazepines_bolus_from_patients_tofilter$charttime_drugs_bolus,benzodiazepines_bolus_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+#Drug Push is Bolus, so I filtered them out
+benzodiazepines_bolus_after_ext<-benzodiazepines_bolus_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_benzodiazepines_bolus_min >=0 
+          )
+
+# benzodiazepines =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(benzodiazepines_bolus_after_ext$subject_id) #158 1/7/18
+
+library(dplyr)
+## if(any(gdrugs_boluspl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+cohort_with_benzodiazepines_bolus_epoch<-benzodiazepines_bolus_after_ext %>%
+  mutate(
+ benzodiazepines_bolus_epoch_01=if_else(time_from_ext_to_benzodiazepines_bolus_min>=0 & time_from_ext_to_benzodiazepines_bolus_min<=60,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_02=if_else(time_from_ext_to_benzodiazepines_bolus_min>60 & time_from_ext_to_benzodiazepines_bolus_min<=120,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_03=if_else(time_from_ext_to_benzodiazepines_bolus_min>120 & time_from_ext_to_benzodiazepines_bolus_min<=180,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_04=if_else(time_from_ext_to_benzodiazepines_bolus_min>180 & time_from_ext_to_benzodiazepines_bolus_min<=240,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_05=if_else(time_from_ext_to_benzodiazepines_bolus_min>240 & time_from_ext_to_benzodiazepines_bolus_min<=300,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_06=if_else(time_from_ext_to_benzodiazepines_bolus_min>300 & time_from_ext_to_benzodiazepines_bolus_min<=360,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_07=if_else(time_from_ext_to_benzodiazepines_bolus_min>360 & time_from_ext_to_benzodiazepines_bolus_min<=420,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_08=if_else(time_from_ext_to_benzodiazepines_bolus_min>420 & time_from_ext_to_benzodiazepines_bolus_min<=480,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_09=if_else(time_from_ext_to_benzodiazepines_bolus_min>480 & time_from_ext_to_benzodiazepines_bolus_min<=540,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_10=if_else(time_from_ext_to_benzodiazepines_bolus_min>540 & time_from_ext_to_benzodiazepines_bolus_min<=600,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_11=if_else(time_from_ext_to_benzodiazepines_bolus_min>600 & time_from_ext_to_benzodiazepines_bolus_min<=660,opioid_amount,NULL)
+,benzodiazepines_bolus_epoch_12=if_else(time_from_ext_to_benzodiazepines_bolus_min>660 & time_from_ext_to_benzodiazepines_bolus_min<=720,opioid_amount,NULL)
+    )
+
+my.sum <- function(x) ifelse( !all(is.na(x)), sum(x, na.rm=T), NA)
+
+cohort_with_benzodiazepines_bolus_epoch<-cohort_with_benzodiazepines_bolus_epoch%>%
+  select(subject_id,benzodiazepines_bolus_epoch_01,benzodiazepines_bolus_epoch_02,benzodiazepines_bolus_epoch_03,benzodiazepines_bolus_epoch_04,benzodiazepines_bolus_epoch_05,benzodiazepines_bolus_epoch_06,benzodiazepines_bolus_epoch_07,benzodiazepines_bolus_epoch_08,benzodiazepines_bolus_epoch_09,benzodiazepines_bolus_epoch_10,benzodiazepines_bolus_epoch_11,benzodiazepines_bolus_epoch_12)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarise_all(my.sum)
+```
+
+# DRUGS NEGATIVE EPOCHS
+
+### Infusion Drugs Before Extubation
+
+#### Opioids Before Extubation
+
+##### Data extraction
+
+##### Negative Epochs Creation (max rate mg/h)
+
+```{r eval=FALSE, include=FALSE}
+  
+#Drug Push is Bolus, so I filtered them out
+opioids_infusion_before_ext<-opioids_infusion_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_opioids_infusion_min >=-12*60 
+          )
+
+# opioids =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(opioids_infusion_before_ext$subject_id) #545 patients 1/7/18
+
+library(dplyr)
+
+cohort_with_opioids_infusion_neg_epoch<-opioids_infusion_before_ext %>%
+  mutate(
+ opioids_infusion_neg_epoch_01=if_else( between (time_from_ext_to_opioids_infusion_min , -60,   0  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_02=if_else( between (time_from_ext_to_opioids_infusion_min ,-120, -60  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_03=if_else( between (time_from_ext_to_opioids_infusion_min ,-180,-120  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_04=if_else( between (time_from_ext_to_opioids_infusion_min ,-240,-180  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_05=if_else( between (time_from_ext_to_opioids_infusion_min ,-300,-240  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_06=if_else( between (time_from_ext_to_opioids_infusion_min ,-360,-300  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_07=if_else( between (time_from_ext_to_opioids_infusion_min ,-420,-360  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_08=if_else( between (time_from_ext_to_opioids_infusion_min ,-480,-420  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_09=if_else( between (time_from_ext_to_opioids_infusion_min ,-540,-480  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_10=if_else( between (time_from_ext_to_opioids_infusion_min ,-600,-540  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_11=if_else( between (time_from_ext_to_opioids_infusion_min ,-660,-600  ),opioid_rate,NULL)
+,opioids_infusion_neg_epoch_12=if_else( between (time_from_ext_to_opioids_infusion_min ,-720,-660  ),opioid_rate,NULL)
+    )
+
+
+cohort_with_opioids_infusion_neg_epoch<-cohort_with_opioids_infusion_neg_epoch%>%
+  select(subject_id,opioids_infusion_neg_epoch_01,opioids_infusion_neg_epoch_02,opioids_infusion_neg_epoch_03,opioids_infusion_neg_epoch_04,opioids_infusion_neg_epoch_05,opioids_infusion_neg_epoch_06,opioids_infusion_neg_epoch_07,opioids_infusion_neg_epoch_08,opioids_infusion_neg_epoch_09,opioids_infusion_neg_epoch_10,opioids_infusion_neg_epoch_11,opioids_infusion_neg_epoch_12)%>%
+  group_by(subject_id)%>%
+  summarise_all(my.max)
+```
+
+#### Benzodiazepines Before Extubation
+
+##### Negative Epochs Creation (max rate mg/h)
+
+```{r eval=FALSE, include=FALSE}
+
+#Drug Push is Bolus, so I filtered them out
+benzodiazepines_infusion_before_ext<-benzodiazepines_infusion_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_benzodiazepines_infusion_min >=-12*60 
+          )
+
+n_distinct(benzodiazepines_infusion_before_ext$subject_id) 
+#240 patients 2/13/19
+
+library(dplyr)
+
+cohort_with_benzodiazepines_infusion_neg_epoch<-benzodiazepines_infusion_before_ext %>%
+  mutate(
+ benzodiazepines_infusion_neg_epoch_01=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min , -60,   0) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_02=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-120, -60) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_03=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-180,-120) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_04=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-240,-180) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_05=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-300,-240) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_06=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-360,-300) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_07=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-420,-360) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_08=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-480,-420) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_09=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-540,-480) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_10=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-600,-540) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_11=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-660,-600) ,opioid_rate,NULL)
+,benzodiazepines_infusion_neg_epoch_12=if_else( between ( time_from_ext_to_benzodiazepines_infusion_min ,-720,-660) ,opioid_rate,NULL)
+    )
+
+ 
+
+cohort_with_benzodiazepines_infusion_neg_epoch<-cohort_with_benzodiazepines_infusion_neg_epoch%>%
+  select(subject_id,benzodiazepines_infusion_neg_epoch_01,benzodiazepines_infusion_neg_epoch_02,benzodiazepines_infusion_neg_epoch_03,benzodiazepines_infusion_neg_epoch_04,benzodiazepines_infusion_neg_epoch_05,benzodiazepines_infusion_neg_epoch_06,benzodiazepines_infusion_neg_epoch_07,benzodiazepines_infusion_neg_epoch_08,benzodiazepines_infusion_neg_epoch_09,benzodiazepines_infusion_neg_epoch_10,benzodiazepines_infusion_neg_epoch_11,benzodiazepines_infusion_neg_epoch_12)%>%
+  group_by(subject_id)%>%
+  summarise_all(my.max)
+```
+
+### Bolus Drugs Before Extubation
+
+
+#### Opioids Before Extubation
+
+##### Data extraction
+
+##### Epochs Creation (total amount mg)
+
+```{r eval=FALSE, include=FALSE}
+
+#Drug Push is Bolus, so I filtered them out
+
+opioids_bolus_before_ext<-opioids_bolus_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_opioids_bolus_min >=-12*60 
+          )
+
+
+n_distinct(opioids_bolus_before_ext$subject_id) #  430 12/13/19
+
+library(dplyr)
+
+cohort_with_opioids_bolus_neg_epoch<-opioids_bolus_before_ext %>%
+  mutate(
+ opioids_bolus_neg_epoch_01=if_else(between(time_from_ext_to_opioids_bolus_min, -60,   0) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_02=if_else(between(time_from_ext_to_opioids_bolus_min,-120, -60) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_03=if_else(between(time_from_ext_to_opioids_bolus_min,-180,-120) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_04=if_else(between(time_from_ext_to_opioids_bolus_min,-240,-180) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_05=if_else(between(time_from_ext_to_opioids_bolus_min,-300,-240) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_06=if_else(between(time_from_ext_to_opioids_bolus_min,-360,-300) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_07=if_else(between(time_from_ext_to_opioids_bolus_min,-420,-360) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_08=if_else(between(time_from_ext_to_opioids_bolus_min,-480,-420) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_09=if_else(between(time_from_ext_to_opioids_bolus_min,-540,-480) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_10=if_else(between(time_from_ext_to_opioids_bolus_min,-600,-540) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_11=if_else(between(time_from_ext_to_opioids_bolus_min,-660,-600) ,opioid_amount,NULL)
+,opioids_bolus_neg_epoch_12=if_else(between(time_from_ext_to_opioids_bolus_min,-720,-660) ,opioid_amount,NULL)
+    )
+
+my.sum <- function(x) ifelse( !all(is.na(x)), sum(x, na.rm=T), NA)
+
+cohort_with_opioids_bolus_neg_epoch<-cohort_with_opioids_bolus_neg_epoch%>%
+  select(subject_id,opioids_bolus_neg_epoch_01,opioids_bolus_neg_epoch_02,opioids_bolus_neg_epoch_03,opioids_bolus_neg_epoch_04,opioids_bolus_neg_epoch_05,opioids_bolus_neg_epoch_06,opioids_bolus_neg_epoch_07,opioids_bolus_neg_epoch_08,opioids_bolus_neg_epoch_09,opioids_bolus_neg_epoch_10,opioids_bolus_neg_epoch_11,opioids_bolus_neg_epoch_12)%>%
+  group_by(subject_id)%>%
+  summarise_all(my.sum)
+```
+
+#### Benzodiazepines Before Extubation
+
+##### Data extraction Before Extubation
+
+##### Negative Epochs Creation (total amount mg/h)
+
+```{r eval=FALSE, include=FALSE}
+ 
+benzodiazepines_bolus_before_ext<-benzodiazepines_bolus_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_benzodiazepines_bolus_min >=-60*12 
+          )
+
+n_distinct(benzodiazepines_bolus_before_ext$subject_id)
+#252 12/13/19
+
+library(dplyr)
+
+cohort_with_benzodiazepines_bolus_neg_epoch<-benzodiazepines_bolus_before_ext %>%
+  mutate(
+ benzodiazepines_bolus_neg_epoch_01=if_else(between(time_from_ext_to_benzodiazepines_bolus_min, -60,   0),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_02=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-120, -60),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_03=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-180,-120),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_04=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-240,-180),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_05=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-300,-240),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_06=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-360,-300),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_07=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-420,-360),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_08=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-480,-420),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_09=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-540,-480),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_10=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-600,-540),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_11=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-660,-600),opioid_amount,NULL)
+,benzodiazepines_bolus_neg_epoch_12=if_else(between(time_from_ext_to_benzodiazepines_bolus_min,-720,-660),opioid_amount,NULL)
+    )
+
+my.sum <- function(x) ifelse( !all(is.na(x)), sum(x, na.rm=T), NA)
+
+cohort_with_benzodiazepines_bolus_neg_epoch<-cohort_with_benzodiazepines_bolus_neg_epoch%>%
+  select(subject_id,benzodiazepines_bolus_neg_epoch_01,benzodiazepines_bolus_neg_epoch_02,benzodiazepines_bolus_neg_epoch_03,benzodiazepines_bolus_neg_epoch_04,benzodiazepines_bolus_neg_epoch_05,benzodiazepines_bolus_neg_epoch_06,benzodiazepines_bolus_neg_epoch_07,benzodiazepines_bolus_neg_epoch_08,benzodiazepines_bolus_neg_epoch_09,benzodiazepines_bolus_neg_epoch_10,benzodiazepines_bolus_neg_epoch_11,benzodiazepines_bolus_neg_epoch_12)%>%
+  group_by(subject_id)%>%
+  summarise_all(my.sum)
+```
+
+
+## Pain Scores Epochs Value
+
+Take the max per EPOCH
+
+-Let's also describe these variables from the list:
+	223781	Pain Present	Pain Present	metavision	chartevents	Pain/Sedation
+	223782	Pain Type	Pain Type	metavision	chartevents	Pain/Sedation
+	223783	Pain Location	Pain Location	metavision	chartevents	Pain/Sedation
+  223784	Pain Cause	Pain Cause	metavision	chartevents	Pain/Sedation
+	223794	Pain Level Acceptable	Pain Level Acceptable	metavision	chartevents	Pain/Sedation		Text
+	223795	Pain Assessment Method	Pain Assessment Method	metavision	chartevents	Pain/Sedation		Text
+	
+	# are we having more than 1 per epoch?
+
+### Data extraction
+
+```{r}
+query<-' SELECT chartevents.subject_id,
+    chartevents.hadm_id,
+    chartevents.icustay_id,
+    chartevents.charttime AS charttime_ps,
+  chartevents.itemid,
+    label,
+    chartevents.value
+   FROM `physionet-data.mimiciii_clinical.chartevents` chartevents INNER JOIN
+`physionet-data.mimiciii_clinical.d_items` d_items 
+ON chartevents.itemid = d_items.itemid
+  WHERE chartevents.itemid IN (1044, 1045, 225813, 227881, 223791, 223782, 223784, 223794, 223795)
+'
+
+
+painschores_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+```
+
+### Epochs Creation
+
+```{r}
+ps_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], painschores_cohort_24)
+
+# we noticed some timezones are alteterd, so we reset them
+ps_from_patients_tofilter$charttime_ps<-as.character(ps_from_patients_tofilter$charttime_ps)
+ps_from_patients_tofilter$charttime.extubation<-as.character(ps_from_patients_tofilter$charttime.extubation)
+ps_from_patients_tofilter$deathtime<-as.character(ps_from_patients_tofilter$deathtime)
+
+
+ps_from_patients_tofilter$charttime_ps<-as.POSIXct(ps_from_patients_tofilter$charttime_ps, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+ps_from_patients_tofilter$charttime.extubation<-as.POSIXct(ps_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+ps_from_patients_tofilter$deathtime<-as.POSIXct(ps_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+ps_from_patients_tofilter['time_from_ext_to_ps_min']<-difftime(ps_from_patients_tofilter$charttime_ps,ps_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+pain_patients<-ps_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_ps_min >=0
+          )
+
+unique(pain_patients$value)
+n_distinct(pain_patients$subject_id) 
+
+pain_patients<-pain_patients%>%filter(itemid !=223795)
+
+pain_patients %>% group_by(itemid,label,value)  %>% summarise(number_of_patients = n_distinct(subject_id)) %>% arrange(label,desc(number_of_patients))
+
+
+library(plyr)
+
+#Maping pain into numbers
+#Reference
+#https://www.disabled-world.com/pics/1/pain-scale-chart.gif
+
+pain_patients$value<-revalue(pain_patients$value,
+                                                    c( 'None to Mild'= 1
+                                                     , 'None' = 0
+                                                     , 'Mild to Moderate' = 3
+                                                     , 'Unable to Score' = NA
+                                                     , 'Moderate to Severe'= 5
+                                                     , 'Moderate to Severe.'= 5
+                                                     , 'Moderate'=4
+                                                     , 'Worst'=10
+                                                     , 'Mild '=2
+                                                     , '0-None'=0
+                                                     , 'Severe to Worse'=9
+                                                     , 'Severe'=6
+                                                     ))
+
+pain_patients$value<-as.numeric(pain_patients$value)
+
+#257 with storetime AS charttime_ps
+if(any(grepl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+## plyr not loaded
+library("plyr")
+## if(any(grepl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+
+
+
+cohort_with_ps_epoch<-pain_patients %>%
+  mutate(
+ ps_epoch_01=if_else(time_from_ext_to_ps_min>=0 & time_from_ext_to_ps_min<=60,value,NULL)
+,ps_epoch_02=if_else(time_from_ext_to_ps_min>60 & time_from_ext_to_ps_min<=120,value,NULL)
+,ps_epoch_03=if_else(time_from_ext_to_ps_min>120 & time_from_ext_to_ps_min<=180,value,NULL)
+,ps_epoch_04=if_else(time_from_ext_to_ps_min>180 & time_from_ext_to_ps_min<=240,value,NULL)
+,ps_epoch_05=if_else(time_from_ext_to_ps_min>240 & time_from_ext_to_ps_min<=300,value,NULL)
+,ps_epoch_06=if_else(time_from_ext_to_ps_min>300 & time_from_ext_to_ps_min<=360,value,NULL)
+,ps_epoch_07=if_else(time_from_ext_to_ps_min>360 & time_from_ext_to_ps_min<=420,value,NULL)
+,ps_epoch_08=if_else(time_from_ext_to_ps_min>420 & time_from_ext_to_ps_min<=480,value,NULL)
+,ps_epoch_09=if_else(time_from_ext_to_ps_min>480 & time_from_ext_to_ps_min<=540,value,NULL)
+,ps_epoch_10=if_else(time_from_ext_to_ps_min>540 & time_from_ext_to_ps_min<=600,value,NULL)
+,ps_epoch_11=if_else(time_from_ext_to_ps_min>600 & time_from_ext_to_ps_min<=660,value,NULL)
+,ps_epoch_12=if_else(time_from_ext_to_ps_min>660 & time_from_ext_to_ps_min<=720,value,NULL)
+    )
+
+
+cohort_with_ps_epoch<-cohort_with_ps_epoch%>%
+  select(subject_id,ps_epoch_01,ps_epoch_02,ps_epoch_03,ps_epoch_04,ps_epoch_05,ps_epoch_06,ps_epoch_07,ps_epoch_08,ps_epoch_09,ps_epoch_10,ps_epoch_11,ps_epoch_12)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarize_all(my.max)
+
+#cohort_with_ps_epoch[cohort_with_ps_epoch==-Inf]<-NA
+```
+
+### Exploring Pain Scores
+
+```{r}
+ps_from_patients_tofilter_short<-pain_patients%>%
+  select(subject_id,charttime_ps,itemid, value)
+
+# ps_from_patients_tofilter_summarized<-ps_from_patients_tofilter_short%>%
+#   cast(subject_id+charttime_ps~itemid,value = 'value')
+
+```
+
+
+## Respiratory Effort Epochs Value
+
+The respiratory effort variables look pretty good! You can't summarize categorical data with means etc. The data can be reported as a frequency distribution by Epoch after extubation. In instances where there is disagreement within the same Epoch, Coding for "Labored", "Splinting", or "Dyspneic" should "win" for the value of the cell in that Epoch. Make sense?
+
+
+
+
+### Data Extraction
+
+```{r}
+query<-(' SELECT chartevents.subject_id,
+    chartevents.hadm_id,
+    chartevents.icustay_id,
+    chartevents.itemid,
+    chartevents.charttime AS charttime_re,
+    chartevents.value
+   FROM `physionet-data.mimiciii_clinical.chartevents` chartevents
+WHERE 
+chartevents.itemid IN (616,223990)')
+
+re_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+```
+
+### Epochs Creation
+
+```{r}
+library(dplyr)
+re_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], re_cohort_24)
+
+# we noticed some timezones are alteterd, so we reset them
+re_from_patients_tofilter$charttime_re<-as.character(re_from_patients_tofilter$charttime_re)
+re_from_patients_tofilter$charttime.extubation<-as.character(re_from_patients_tofilter$charttime.extubation)
+re_from_patients_tofilter$deathtime<-as.character(re_from_patients_tofilter$deathtime)
+
+
+re_from_patients_tofilter$charttime_re<-as.POSIXct(re_from_patients_tofilter$charttime_re, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+re_from_patients_tofilter$charttime.extubation<-as.POSIXct(re_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+re_from_patients_tofilter$deathtime<-as.POSIXct(re_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+re_from_patients_tofilter['time_from_ext_to_re_min']<-difftime(re_from_patients_tofilter$charttime_re,re_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+
+re_patients<-re_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_re_min >=0 
+          )
+
+table(re_patients$value)
+
+n_distinct(re_patients$subject_id) 
+#294 patients with storetime AS charttime_re
+
+#priorizing Dyspneic and Labored
+#Dyspneic 1  Labored 1 Agonal 0   Apneic 0 Normal 0  Shallow 0
+
+#maping strings to numbers so then we can priorize
+re_patients$value<-plyr::revalue(re_patients$value,  c('Dyspneic' = 1
+                                                     , 'Labored' = 1
+                                                     , 'Agonal'= 0
+                                                     , 'Apneic' = 0
+                                                     , 'Normal'= 0
+                                                     , 'Shallow'= 0
+                                                     ))
+
+
+re_patients$value<-as.numeric(re_patients$value)
+
+if(any(grepl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+## plyr not loaded
+library("plyr")
+## if(any(grepl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+
+
+cohort_with_re_epoch<-re_patients %>%
+  mutate(
+ re_epoch_01=if_else(time_from_ext_to_re_min>=0 & time_from_ext_to_re_min<=60,value,NULL)
+,re_epoch_02=if_else(time_from_ext_to_re_min>60 & time_from_ext_to_re_min<=120,value,NULL)
+,re_epoch_03=if_else(time_from_ext_to_re_min>120 & time_from_ext_to_re_min<=180,value,NULL)
+,re_epoch_04=if_else(time_from_ext_to_re_min>180 & time_from_ext_to_re_min<=240,value,NULL)
+,re_epoch_05=if_else(time_from_ext_to_re_min>240 & time_from_ext_to_re_min<=300,value,NULL)
+,re_epoch_06=if_else(time_from_ext_to_re_min>300 & time_from_ext_to_re_min<=360,value,NULL)
+,re_epoch_07=if_else(time_from_ext_to_re_min>360 & time_from_ext_to_re_min<=420,value,NULL)
+,re_epoch_08=if_else(time_from_ext_to_re_min>420 & time_from_ext_to_re_min<=480,value,NULL)
+,re_epoch_09=if_else(time_from_ext_to_re_min>480 & time_from_ext_to_re_min<=540,value,NULL)
+,re_epoch_10=if_else(time_from_ext_to_re_min>540 & time_from_ext_to_re_min<=600,value,NULL)
+,re_epoch_11=if_else(time_from_ext_to_re_min>600 & time_from_ext_to_re_min<=660,value,NULL)
+,re_epoch_12=if_else(time_from_ext_to_re_min>660 & time_from_ext_to_re_min<=720,value,NULL)
+    )
+
+
+cohort_with_re_epoch<-cohort_with_re_epoch%>%
+    select(subject_id,re_epoch_01,re_epoch_02,re_epoch_03,re_epoch_04,re_epoch_05,re_epoch_06
+           ,re_epoch_07,re_epoch_08,re_epoch_09,re_epoch_10,re_epoch_11,re_epoch_12)%>%
+  group_by(subject_id)%>%
+  dplyr::summarize_all(my.max)
+
+
+
+#view(dfSummary(cohort_with_re_epoch))
+
+```
+
+
+## RASS effort Epochs Value
+
+I'm taking the max per epoch
+
+### Data Extraction
+
+```{r}
+query<-(' SELECT chartevents.subject_id,
+    chartevents.hadm_id,
+    chartevents.icustay_id,
+    chartevents.itemid,
+    chartevents.charttime AS charttime_rass,
+    chartevents.value
+   FROM `physionet-data.mimiciii_clinical.chartevents` chartevents
+WHERE 
+chartevents.itemid IN (228302,228299,228096)')
+
+rass_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+```
+
+### Epochs Creation
+
+```{r}
+library(dplyr)
+rass_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], rass_cohort_24)
+
+# we noticed some timezones are alteterd, so we reset them
+rass_from_patients_tofilter$charttime_rass<-as.character(rass_from_patients_tofilter$charttime_rass)
+rass_from_patients_tofilter$charttime.extubation<-as.character(rass_from_patients_tofilter$charttime.extubation)
+rass_from_patients_tofilter$deathtime<-as.character(rass_from_patients_tofilter$deathtime)
+
+
+rass_from_patients_tofilter$charttime_rass<-as.POSIXct(rass_from_patients_tofilter$charttime_rass, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+rass_from_patients_tofilter$charttime.extubation<-as.POSIXct(rass_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+rass_from_patients_tofilter$deathtime<-as.POSIXct(rass_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+rass_from_patients_tofilter['time_from_ext_to_rass_min']<-difftime(rass_from_patients_tofilter$charttime_rass,rass_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+
+rass_patients<-rass_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_rass_min >=0 
+          )
+
+library(plyr)
+
+#Maping rass into numbers
+#Reference
+#httrass://www.disabled-world.com/pics/1/rass-scale-chart.gif
+
+rass_patients$value<-revalue(rass_patients$value,
+                                                c("-1 Awakens to voice (eye opening/contact) > 10 sec"= -1
+                                                , "-2 Light sedation, briefly awakens to voice (eye opening/contact) < 10 sec"  = -2
+                                                , "-3 Moderate sedation, movement or eye opening; No eye contact" = -3
+                                                , "-4 Deep sedation, no response to voice, but movement or eye opening to physical stimulation" = -4
+                                                , "-5 Unarousable, no response to voice or physical stimulation"= -5
+                                                , " 0  Alert and calm"= 0
+                                                , "+1 Anxious, apprehensive, but not aggressive"=1
+                                                , "+2 Frequent nonpurposeful movement, fights ventilator"=2
+                                                , "+3 Pulls or removes tube(s) or catheter(s); aggressive"=3
+                                                     ))
+
+rass_patients$value<-as.numeric(rass_patients$value)
+n_distinct(rass_patients$subject_id) 
+#194 patients with storetime AS charttime_rass
+if(any(grepl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+## plyr not loaded
+library("plyr")
+## if(any(grepl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+
+
+my.max <- function(x) ifelse( !all(is.na(x)), max(x, na.rm=T), NA)
+
+cohort_with_max_rass_epoch<-rass_patients %>%
+  mutate(
+    #change to rass epoch max and min
+ max_rass_epoch_01=if_else(time_from_ext_to_rass_min>=0 & time_from_ext_to_rass_min<=60,value,NULL)
+,max_rass_epoch_02=if_else(time_from_ext_to_rass_min>60 & time_from_ext_to_rass_min<=120,value,NULL)
+,max_rass_epoch_03=if_else(time_from_ext_to_rass_min>120 & time_from_ext_to_rass_min<=180,value,NULL)
+,max_rass_epoch_04=if_else(time_from_ext_to_rass_min>180 & time_from_ext_to_rass_min<=240,value,NULL)
+,max_rass_epoch_05=if_else(time_from_ext_to_rass_min>240 & time_from_ext_to_rass_min<=300,value,NULL)
+,max_rass_epoch_06=if_else(time_from_ext_to_rass_min>300 & time_from_ext_to_rass_min<=360,value,NULL)
+,max_rass_epoch_07=if_else(time_from_ext_to_rass_min>360 & time_from_ext_to_rass_min<=420,value,NULL)
+,max_rass_epoch_08=if_else(time_from_ext_to_rass_min>420 & time_from_ext_to_rass_min<=480,value,NULL)
+,max_rass_epoch_09=if_else(time_from_ext_to_rass_min>480 & time_from_ext_to_rass_min<=540,value,NULL)
+,max_rass_epoch_10=if_else(time_from_ext_to_rass_min>540 & time_from_ext_to_rass_min<=600,value,NULL)
+,max_rass_epoch_11=if_else(time_from_ext_to_rass_min>600 & time_from_ext_to_rass_min<=660,value,NULL)
+,max_rass_epoch_12=if_else(time_from_ext_to_rass_min>660 & time_from_ext_to_rass_min<=720,value,NULL)
+    )
+
+cohort_with_max_rass_epoch<-cohort_with_max_rass_epoch%>%
+      select(subject_id,max_rass_epoch_01,max_rass_epoch_02,max_rass_epoch_03,max_rass_epoch_04,max_rass_epoch_05,max_rass_epoch_06,max_rass_epoch_07,max_rass_epoch_08,max_rass_epoch_09,max_rass_epoch_10,max_rass_epoch_11,max_rass_epoch_12)%>%
+  group_by(subject_id)%>%
+  summarize_all(my.max)
+
+
+my.min <- function(x) ifelse( !all(is.na(x)), min(x, na.rm=T), NA)
+
+
+cohort_with_min_rass_epoch<-rass_patients %>%
+  mutate(
+    #change to rass epoch min and min
+ min_rass_epoch_01=if_else(time_from_ext_to_rass_min>=0 & time_from_ext_to_rass_min<=60,value,NULL)
+,min_rass_epoch_02=if_else(time_from_ext_to_rass_min>60 & time_from_ext_to_rass_min<=120,value,NULL)
+,min_rass_epoch_03=if_else(time_from_ext_to_rass_min>120 & time_from_ext_to_rass_min<=180,value,NULL)
+,min_rass_epoch_04=if_else(time_from_ext_to_rass_min>180 & time_from_ext_to_rass_min<=240,value,NULL)
+,min_rass_epoch_05=if_else(time_from_ext_to_rass_min>240 & time_from_ext_to_rass_min<=300,value,NULL)
+,min_rass_epoch_06=if_else(time_from_ext_to_rass_min>300 & time_from_ext_to_rass_min<=360,value,NULL)
+,min_rass_epoch_07=if_else(time_from_ext_to_rass_min>360 & time_from_ext_to_rass_min<=420,value,NULL)
+,min_rass_epoch_08=if_else(time_from_ext_to_rass_min>420 & time_from_ext_to_rass_min<=480,value,NULL)
+,min_rass_epoch_09=if_else(time_from_ext_to_rass_min>480 & time_from_ext_to_rass_min<=540,value,NULL)
+,min_rass_epoch_10=if_else(time_from_ext_to_rass_min>540 & time_from_ext_to_rass_min<=600,value,NULL)
+,min_rass_epoch_11=if_else(time_from_ext_to_rass_min>600 & time_from_ext_to_rass_min<=660,value,NULL)
+,min_rass_epoch_12=if_else(time_from_ext_to_rass_min>660 & time_from_ext_to_rass_min<=720,value,NULL)
+    )
+
+cohort_with_min_rass_epoch<-cohort_with_min_rass_epoch%>%
+      select(subject_id,min_rass_epoch_01,min_rass_epoch_02,min_rass_epoch_03,min_rass_epoch_04,min_rass_epoch_05,min_rass_epoch_06,min_rass_epoch_07,min_rass_epoch_08,min_rass_epoch_09,min_rass_epoch_10,min_rass_epoch_11,min_rass_epoch_12)%>%
+  group_by(subject_id)%>%
+  summarize_all(my.min)
+```
+
+
+
+
+
