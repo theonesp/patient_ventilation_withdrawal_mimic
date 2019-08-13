@@ -16,6 +16,16 @@ library(reshape)
 library(dplyr)
 ```
 
+```{r}
+library(bigrquery)
+project_id <- "hst-953-2018"
+options(httr_oauth_cache=FALSE)
+run_query <- function(query){
+  data <- query_exec(query, project=project_id, use_legacy_sql=FALSE,max_pages = Inf)
+  return(data)
+}
+```
+
 # Getting the list of ids from our previously generated cohort.
 
 ```{r}
@@ -32,7 +42,7 @@ hadm_ids_fromourcohort24 <- toString(sprintf("%s", hadm_ids_fromourcohort24))
 ### Data extraction
 
 - ATENTION: FOR SOME REASON THE LIBRARY IS NOT EXTRACTING TIME FROM THE DATETIME, only the data so I used pgadmin and exporter in csv.
-- Extracting the data in csv was causing a lot of datetime to be NULL where importing them so I used Big Query.
+- Extracting the data in csv was causing a lot of datetime to be NULL when importing them, so I used Big Query.
 - Extracting the data in Big Query was chaning the timezone so it needed to be reseted.
 
 ```{r}

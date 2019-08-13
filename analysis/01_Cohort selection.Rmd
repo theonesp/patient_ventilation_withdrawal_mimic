@@ -5,20 +5,6 @@ date: "August 1, 2018"
 output: html_document
 ---
 
-
-
-```{r}
-library(bigrquery)
-
-project_id <- "hst-953-2018"
-options(httr_oauth_cache=FALSE)
-run_query <- function(query){
-  data <- query_exec(query, project=project_id, use_legacy_sql=FALSE,max_pages = Inf)
-  return(data)
-}
-```
-
-
 ## Data extraction
 
 ### CMO
