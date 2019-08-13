@@ -5,33 +5,28 @@ date: "August 1, 2018"
 output: html_document
 ---
 
-# SQL connection
+
 
 ```{r}
-library(RPostgreSQL)
-library(DBI)
+library(bigrquery)
 
-pw<- {
-  'admin'
+project_id <- "hst-953-2018"
+options(httr_oauth_cache=FALSE)
+run_query <- function(query){
+  data <- query_exec(query, project=project_id, use_legacy_sql=FALSE,max_pages = Inf)
+  return(data)
 }
-drv <- dbDriver("PostgreSQL")
-con <- dbConnect( drv
-     , host='localhost'
-     , port='5432'
-     , dbname='mimiciii'
-     , user=''
-     , password=pw)
-
-
-rm(pw) # removes the password
 ```
+
 
 ## Data extraction
 
 ### CMO
 
 ```{r}
-code_status_cmo<-dbGetQuery(con,'
+code_status_cmo<-run_query(
+#con,
+'
 with sq as(SELECT distinct subject_id, hadm_id, icustay_id
   ,COALESCE(timecmo_chart, timecmo_nursingnote, NULL ) AS codestatus_time
 ,Row_Number() Over (Partition By code_status.subject_id ORDER BY COALESCE(timecmo_chart, timecmo_nursingnote, NULL ) Desc) As position
