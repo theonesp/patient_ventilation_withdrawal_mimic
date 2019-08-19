@@ -827,8 +827,6 @@ cohort_with_benzodiazepines_bolus_epoch<-cohort_with_benzodiazepines_bolus_epoch
 
 #### Opioids Before Extubation
 
-##### Data extraction
-
 ##### Negative Epochs Creation (max rate mg/h)
 
 ```{r eval=FALSE, include=FALSE}
@@ -999,7 +997,7 @@ cohort_with_benzodiazepines_bolus_neg_epoch<-cohort_with_benzodiazepines_bolus_n
 ```
 
 
-## Pain Scores Epochs Value
+# Pain Scores Epochs Value
 
 Take the max per EPOCH
 
@@ -1013,7 +1011,7 @@ Take the max per EPOCH
 	
 	# are we having more than 1 per epoch?
 
-### Data extraction
+## Data extraction
 
 ```{r}
 query<-' SELECT chartevents.subject_id,
@@ -1033,7 +1031,7 @@ ON chartevents.itemid = d_items.itemid
 painschores_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
 ```
 
-### Epochs Creation
+## Epochs Creation
 
 ```{r}
 ps_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], painschores_cohort_24)
@@ -1121,7 +1119,7 @@ cohort_with_ps_epoch<-cohort_with_ps_epoch%>%
 #cohort_with_ps_epoch[cohort_with_ps_epoch==-Inf]<-NA
 ```
 
-### Exploring Pain Scores
+## Exploring Pain Scores
 
 ```{r}
 ps_from_patients_tofilter_short<-pain_patients%>%
@@ -1133,14 +1131,14 @@ ps_from_patients_tofilter_short<-pain_patients%>%
 ```
 
 
-## Respiratory Effort Epochs Value
+# Respiratory Effort Epochs Value
 
 The respiratory effort variables look pretty good! You can't summarize categorical data with means etc. The data can be reported as a frequency distribution by Epoch after extubation. In instances where there is disagreement within the same Epoch, Coding for "Labored", "Splinting", or "Dyspneic" should "win" for the value of the cell in that Epoch. Make sense?
 
 
 
 
-### Data Extraction
+## Data Extraction
 
 ```{r}
 query<-(' SELECT chartevents.subject_id,
@@ -1157,7 +1155,7 @@ re_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pag
 
 ```
 
-### Epochs Creation
+## Epochs Creation
 
 ```{r}
 library(dplyr)
@@ -1238,11 +1236,11 @@ cohort_with_re_epoch<-cohort_with_re_epoch%>%
 ```
 
 
-## RASS effort Epochs Value
+# RASS effort Epochs Value
 
 I'm taking the max per epoch
 
-### Data Extraction
+## Data Extraction
 
 ```{r}
 query<-(' SELECT chartevents.subject_id,
@@ -1259,7 +1257,7 @@ rass_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_p
 
 ```
 
-### Epochs Creation
+## Epochs Creation
 
 ```{r}
 library(dplyr)

@@ -28,7 +28,7 @@ final_dataset<-left_join(final_dataset,last_pao2fio2_patients_final)
 
 #Epochs joins
 final_dataset<-left_join(final_dataset,final_rr_te_epoch)
-final_dataset<-left_join(final_dataset, rr_from_patients_tofilter_first_final)
+final_dataset<-left_join(final_dataset,rr_from_patients_tofilter_first_final)
 final_dataset<-left_join(final_dataset,cohort_with_opioids_infusion_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_benzodiazepines_infusion_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_opioids_bolus_epoch)
@@ -42,10 +42,29 @@ final_dataset<-left_join(final_dataset,cohort_with_ps_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_min_rass_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_max_rass_epoch)
 
+#new drugs Epochs joins
+final_dataset<-left_join(final_dataset,cohort_with_propofol_bolus_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_midazolam_bolus_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_lorazepam_bolus_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_dexmedetomedie_bolus_epoch)
+
+#new drugs neg Epochs joins
+final_dataset<-left_join(final_dataset,cohort_with_propofol_bolus_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_midazolam_bolus_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_lorazepam_bolus_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_dexmedetomedie_bolus_neg_epoch)
+
+#new drugs with only neg infusions Epochs joins
+final_dataset<-left_join(final_dataset,cohort_with_phenylephrine_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_norepinephrine_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_dopamine_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_epinephrine_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_vasopressin_infusion_neg_epoch)                       
+
 
 library(foreign)
 write.dta(final_dataset, "final_dataset.dta")
-cat(names(final_dataset),sep = ',')
+cat(names(final_dataset),sep = '\n')
 #view(dfSummary(final_dataset))
 
 ```

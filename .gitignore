@@ -3,3 +3,4 @@
 .RData
 .Ruserdata
 00_connection_settings.Rmd
+.DS_Store
