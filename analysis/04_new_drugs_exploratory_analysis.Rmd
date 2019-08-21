@@ -96,8 +96,6 @@ cohort_with_propofol_infusion_epoch<-cohort_with_propofol_infusion_epoch%>%
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.max)
-
-write.csv(cohort_with_propofol_infusion_epoch,'cohort_with_propofol_infusion_epoch.csv',row.names = F)
 ```
 
 ### Bolus Drugs
@@ -174,8 +172,160 @@ cohort_with_propofol_bolus_epoch<-cohort_with_propofol_bolus_epoch%>%
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.sum)
+```
 
-write.csv(cohort_with_propofol_bolus_epoch,'cohort_with_propofol_bolus_epoch.csv',row.names = F)
+## diazepam
+
+### Infusion Drugs
+
+##### Data extraction
+
+*There are only Drug Push of diazepam, not continuous infusions.*
+
+```{r eval=FALSE, include=FALSE}
+query<-"
+SELECT
+  inputevents_mv.subject_id,
+  inputevents_mv.hadm_id,
+  inputevents_mv.icustay_id,
+  inputevents_mv.itemid,
+  COALESCE(inputevents_mv.storetime,inputevents_mv.starttime) AS charttime_drugs_infusion,
+  inputevents_mv.rate,
+  inputevents_mv.rateuom,
+  inputevents_mv.ordercategorydescription
+From
+  `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
+    
+WHERE
+  inputevents_mv.itemid IN (221623)
+  AND ordercategorydescription = 'Continuous Med'
+"
+
+diazepam_infusion_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+diazepam_infusion_cohort_24$itemid[diazepam_infusion_cohort_24$itemid==221623]<-'diazepam'
+#Valium (Diazepam)
+#We tried valium and it didn't increase the number of patients, still 84 after ext
+```
+
+##### Epochs Creation (max rate mg/h)
+
+```{r eval=FALSE, include=FALSE}
+diazepam_infusion_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], diazepam_infusion_cohort_24)
+
+# we noticed some timezones adrugs_infusion alteterd, so we drugs_infusionset them
+diazepam_infusion_from_patients_tofilter$charttime_drugs_infusion<-as.character(diazepam_infusion_from_patients_tofilter$charttime_drugs_infusion)
+diazepam_infusion_from_patients_tofilter$charttime.extubation<-as.character(diazepam_infusion_from_patients_tofilter$charttime.extubation)
+diazepam_infusion_from_patients_tofilter$deathtime<-as.character(diazepam_infusion_from_patients_tofilter$deathtime)
+
+
+diazepam_infusion_from_patients_tofilter$charttime_drugs_infusion<-as.POSIXct(diazepam_infusion_from_patients_tofilter$charttime_drugs_infusion, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+diazepam_infusion_from_patients_tofilter$charttime.extubation<-as.POSIXct(diazepam_infusion_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+diazepam_infusion_from_patients_tofilter$deathtime<-as.POSIXct(diazepam_infusion_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+diazepam_infusion_from_patients_tofilter['time_from_ext_to_diazepam_infusion_min']<-difftime(diazepam_infusion_from_patients_tofilter$charttime_drugs_infusion,diazepam_infusion_from_patients_tofilter$charttime.extubation,units = 'mins')
+
+
+#Drug Push is Bolus, so I filtered them out
+diazepam_infusion_after_ext<-diazepam_infusion_from_patients_tofilter %>%
+  filter( 
+    time_from_ext_to_diazepam_infusion_min >=0 
+  )
+
+# diazepam =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(diazepam_infusion_after_ext$subject_id) #84 patients 1/7/18
+
+library(dplyr)
+## if(any(gdrugs_infusionpl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+cohort_with_diazepam_infusion_epoch<-diazepam_infusion_after_ext %>%
+  mutate(
+    diazepam_infusion_epoch_01=if_else(time_from_ext_to_diazepam_infusion_min>=0 & time_from_ext_to_diazepam_infusion_min<=60,rate,NULL)
+    ,diazepam_infusion_epoch_02=if_else(time_from_ext_to_diazepam_infusion_min>60 & time_from_ext_to_diazepam_infusion_min<=120,rate,NULL)
+  )
+
+
+cohort_with_diazepam_infusion_epoch<-cohort_with_diazepam_infusion_epoch%>%
+  select(subject_id,diazepam_infusion_epoch_01,diazepam_infusion_epoch_02)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarise_all(my.max)
+```
+
+### Bolus Drugs
+
+##### Data extraction
+
+```{r eval=FALSE, include=FALSE}
+query<-"
+SELECT
+  inputevents_mv.subject_id,
+  inputevents_mv.hadm_id,
+  inputevents_mv.icustay_id,
+  inputevents_mv.itemid,
+  COALESCE(inputevents_mv.storetime,inputevents_mv.starttime) AS charttime_drugs_bolus,
+  inputevents_mv.amount,
+  inputevents_mv.amountuom,
+  inputevents_mv.ordercategorydescription
+From
+  `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
+    
+WHERE
+  inputevents_mv.itemid In (221623)
+  AND ordercategorydescription = 'Drug Push' "
+
+diazepam_bolus_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
+
+diazepam_bolus_cohort_24$itemid[diazepam_bolus_cohort_24$itemid==221623]<-'diazepam'
+```
+
+##### Epochs Creation (total amount mg)
+
+```{r eval=FALSE, include=FALSE}
+library(dplyr)
+diazepam_bolus_from_patients_tofilter<-inner_join(cmo_and_extubation_and_death_24[,c('subject_id','icustay_id','charttime.extubation','deathtime')], diazepam_bolus_cohort_24)
+
+# we noticed some timezones adrugs_bolus alteterd, so we drugs_bolusset them
+diazepam_bolus_from_patients_tofilter$charttime_drugs_bolus<-as.character(diazepam_bolus_from_patients_tofilter$charttime_drugs_bolus)
+diazepam_bolus_from_patients_tofilter$charttime.extubation<-as.character(diazepam_bolus_from_patients_tofilter$charttime.extubation)
+diazepam_bolus_from_patients_tofilter$deathtime<-as.character(diazepam_bolus_from_patients_tofilter$deathtime)
+
+
+diazepam_bolus_from_patients_tofilter$charttime_drugs_bolus<-as.POSIXct(diazepam_bolus_from_patients_tofilter$charttime_drugs_bolus, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+diazepam_bolus_from_patients_tofilter$charttime.extubation<-as.POSIXct(diazepam_bolus_from_patients_tofilter$charttime.extubation, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+diazepam_bolus_from_patients_tofilter$deathtime<-as.POSIXct(diazepam_bolus_from_patients_tofilter$deathtime, format='%Y-%m-%d %H:%M:%S', tz="GMT")
+
+diazepam_bolus_from_patients_tofilter['time_from_ext_to_diazepam_bolus_min']<-difftime(diazepam_bolus_from_patients_tofilter$charttime_drugs_bolus,diazepam_bolus_from_patients_tofilter$charttime.extubation,units = 'mins')
+  
+
+#Drug Push is Bolus, so I filtered them out
+diazepam_bolus_after_ext<-diazepam_bolus_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_diazepam_bolus_min >=0 
+          )
+
+# diazepam =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(diazepam_bolus_after_ext$subject_id) 
+# 355 patients with time_from_ext_to_diazepam_bolus_min >=-2*60 1/7/18
+# 322 patients with time_from_ext_to_diazepam_bolus_min >=0 2/12/19
+
+
+library(dplyr)
+## if(any(gdrugs_boluspl("package:plyr", search()))) detach("package:plyr") else message("plyr not loaded")
+cohort_with_diazepam_bolus_epoch<-diazepam_bolus_after_ext %>%
+  mutate(
+ diazepam_bolus_epoch_01=if_else(time_from_ext_to_diazepam_bolus_min>=0 & time_from_ext_to_diazepam_bolus_min<=60,amount,NULL)
+,diazepam_bolus_epoch_02=if_else(time_from_ext_to_diazepam_bolus_min>60 & time_from_ext_to_diazepam_bolus_min<=120,amount,NULL)
+    )
+
+my.sum <- function(x) ifelse( !all(is.na(x)), sum(x, na.rm=T), NA)
+
+cohort_with_diazepam_bolus_epoch<-cohort_with_diazepam_bolus_epoch%>%
+  select(subject_id,diazepam_bolus_epoch_01,diazepam_bolus_epoch_02)%>%
+  group_by(subject_id)%>%
+  #summarize(mean(value,na.rm=TRUE))
+  summarise_all(my.sum)
 ```
 
 # midazolam
@@ -199,7 +349,7 @@ From
   `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
     
 WHERE
-  inputevents_mv.itemid IN (222168)
+  inputevents_mv.itemid IN (221668)
   AND ordercategorydescription = 'Continuous Med'
 "
 
@@ -234,7 +384,7 @@ midazolam_infusion_after_ext<-midazolam_infusion_from_patients_tofilter %>%
     time_from_ext_to_midazolam_infusion_min >=0 
   )
 
-# midazolam =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
 
 n_distinct(midazolam_infusion_after_ext$subject_id) #84 patients 1/7/18
 
@@ -252,8 +402,6 @@ cohort_with_midazolam_infusion_epoch<-cohort_with_midazolam_infusion_epoch%>%
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.max)
-
-write.csv(cohort_with_midazolam_infusion_epoch,'cohort_with_midazolam_infusion_epoch.csv',row.names = F)
 ```
 
 ## Bolus Drugs
@@ -275,7 +423,7 @@ From
   `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
     
 WHERE
-  inputevents_mv.itemid In (222168)
+  inputevents_mv.itemid In (221668)
   AND ordercategorydescription = 'Drug Push' "
 
 midazolam_bolus_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
@@ -308,7 +456,7 @@ midazolam_bolus_after_ext<-midazolam_bolus_from_patients_tofilter %>%
           time_from_ext_to_midazolam_bolus_min >=0 
           )
 
-# midazolam =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
 
 n_distinct(midazolam_bolus_after_ext$subject_id) 
 # 355 patients with time_from_ext_to_midazolam_bolus_min >=-2*60 1/7/18
@@ -330,8 +478,6 @@ cohort_with_midazolam_bolus_epoch<-cohort_with_midazolam_bolus_epoch%>%
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.sum)
-
-write.csv(cohort_with_midazolam_bolus_epoch,'cohort_with_midazolam_bolus_epoch.csv',row.names = F)
 ```
 
 ## lorazepam
@@ -355,7 +501,7 @@ From
   `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
     
 WHERE
-  inputevents_mv.itemid IN (222168)
+  inputevents_mv.itemid IN (221385)
   AND ordercategorydescription = 'Continuous Med'
 "
 
@@ -408,8 +554,6 @@ cohort_with_lorazepam_infusion_epoch<-cohort_with_lorazepam_infusion_epoch%>%
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.max)
-
-write.csv(cohort_with_lorazepam_infusion_epoch,'cohort_with_lorazepam_infusion_epoch.csv',row.names = F)
 ```
 
 ### Bolus Drugs
@@ -431,7 +575,7 @@ From
   `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
     
 WHERE
-  inputevents_mv.itemid In (222168)
+  inputevents_mv.itemid In (221385)
   AND ordercategorydescription = 'Drug Push' "
 
 lorazepam_bolus_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
@@ -486,8 +630,6 @@ cohort_with_lorazepam_bolus_epoch<-cohort_with_lorazepam_bolus_epoch%>%
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.sum)
-
-write.csv(cohort_with_lorazepam_bolus_epoch,'cohort_with_lorazepam_bolus_epoch.csv',row.names = F)
 ```
 
 ## dexmedetomedie
@@ -511,7 +653,7 @@ From
   `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
     
 WHERE
-  inputevents_mv.itemid IN (222168)
+  inputevents_mv.itemid IN (225150)
   AND ordercategorydescription = 'Continuous Med'
 "
 
@@ -564,8 +706,6 @@ cohort_with_dexmedetomedie_infusion_epoch<-cohort_with_dexmedetomedie_infusion_e
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.max)
-
-write.csv(cohort_with_dexmedetomedie_infusion_epoch,'cohort_with_dexmedetomedie_infusion_epoch.csv',row.names = F)
 ```
 
 ### Bolus Drugs
@@ -587,7 +727,7 @@ From
   `physionet-data.mimiciii_clinical.inputevents_mv` inputevents_mv
     
 WHERE
-  inputevents_mv.itemid In (222168)
+  inputevents_mv.itemid In (225150)
   AND ordercategorydescription = 'Drug Push' "
 
 dexmedetomedie_bolus_cohort_24<-query_exec(query, project = project_HST,use_legacy_sql = F,max_pages = Inf)
@@ -642,8 +782,6 @@ cohort_with_dexmedetomedie_bolus_epoch<-cohort_with_dexmedetomedie_bolus_epoch%>
   group_by(subject_id)%>%
   #summarize(mean(value,na.rm=TRUE))
   summarise_all(my.sum)
-
-write.csv(cohort_with_dexmedetomedie_bolus_epoch,'cohort_with_dexmedetomedie_bolus_epoch.csv',row.names = F)
 ```
 
 # NEGATIVE EPOCHS
@@ -721,6 +859,71 @@ cohort_with_propofol_bolus_neg_epoch<-cohort_with_propofol_bolus_neg_epoch%>%
   summarise_all(my.sum)
 ```
 
+## diazepam 
+
+### Infusion Drugs 
+
+#### Negative Epochs Creation (max rate mg/h)
+
+```{r eval=FALSE, include=FALSE}
+  
+#Drug Push is Bolus, so I filtered them out
+diazepam_infusion_before_ext<-diazepam_infusion_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_diazepam_infusion_min >=-12*60 
+          )
+
+# diazepam =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
+n_distinct(diazepam_infusion_before_ext$subject_id) #545 patients 1/7/18
+
+library(dplyr)
+
+cohort_with_diazepam_infusion_neg_epoch<-diazepam_infusion_before_ext %>%
+  mutate(
+ diazepam_infusion_neg_epoch_01=if_else( between (time_from_ext_to_diazepam_infusion_min , -60,   0  ),rate,NULL)
+,diazepam_infusion_neg_epoch_02=if_else( between (time_from_ext_to_diazepam_infusion_min ,-120, -60  ),rate,NULL)
+    )
+
+
+cohort_with_diazepam_infusion_neg_epoch<-cohort_with_diazepam_infusion_neg_epoch%>%
+  select(subject_id,diazepam_infusion_neg_epoch_01,diazepam_infusion_neg_epoch_02)%>%
+  group_by(subject_id)%>%
+  summarise_all(my.max)
+```
+
+### Bolus Drugs 
+
+#### Negative Epochs Creation (total amount mg)
+
+```{r eval=FALSE, include=FALSE}
+
+#Drug Push is Bolus, so I filtered them out
+
+diazepam_bolus_before_ext<-diazepam_bolus_from_patients_tofilter %>%
+  filter( 
+          time_from_ext_to_diazepam_bolus_min >=-12*60 
+          )
+
+
+n_distinct(diazepam_bolus_before_ext$subject_id) #  430 12/13/19
+
+library(dplyr)
+
+cohort_with_diazepam_bolus_neg_epoch<-diazepam_bolus_before_ext %>%
+  mutate(
+ diazepam_bolus_neg_epoch_01=if_else(between(time_from_ext_to_diazepam_bolus_min, -60,   0) ,amount,NULL)
+,diazepam_bolus_neg_epoch_02=if_else(between(time_from_ext_to_diazepam_bolus_min,-120, -60) ,amount,NULL)
+    )
+
+my.sum <- function(x) ifelse( !all(is.na(x)), sum(x, na.rm=T), NA)
+
+cohort_with_diazepam_bolus_neg_epoch<-cohort_with_diazepam_bolus_neg_epoch%>%
+  select(subject_id,diazepam_bolus_neg_epoch_01,diazepam_bolus_neg_epoch_02)%>%
+  group_by(subject_id)%>%
+  summarise_all(my.sum)
+```
+
 ## midazolam 
 
 ### Infusion Drugs 
@@ -735,7 +938,7 @@ midazolam_infusion_before_ext<-midazolam_infusion_from_patients_tofilter %>%
           time_from_ext_to_midazolam_infusion_min >=-12*60 
           )
 
-# midazolam =  1 milligram of morphine IV (225154) is equivalent to .01 mg Fentanyl IV (221744).
+
 
 n_distinct(midazolam_infusion_before_ext$subject_id) #545 patients 1/7/18
 

@@ -5,12 +5,13 @@ date: "August 1, 2018"
 output: html_document
 ---
 
-# Libraries and data
+# Environment
 
 ```{r}
 library(RPostgreSQL)
 library(DBI)
 library(dplyr)
+library(summarytools)
 ```
 
 ## Data extraction
@@ -44,15 +45,30 @@ final_dataset<-left_join(final_dataset,cohort_with_max_rass_epoch)
 
 #new drugs Epochs joins
 final_dataset<-left_join(final_dataset,cohort_with_propofol_bolus_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_diazepam_bolus_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_midazolam_bolus_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_lorazepam_bolus_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_dexmedetomedie_bolus_epoch)
 
+final_dataset<-left_join(final_dataset,cohort_with_propofol_infusion_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_diazepam_infusion_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_midazolam_infusion_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_lorazepam_infusion_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_dexmedetomedie_infusion_epoch)
+
 #new drugs neg Epochs joins
 final_dataset<-left_join(final_dataset,cohort_with_propofol_bolus_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_diazepam_bolus_neg_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_midazolam_bolus_neg_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_lorazepam_bolus_neg_epoch)
 final_dataset<-left_join(final_dataset,cohort_with_dexmedetomedie_bolus_neg_epoch)
+
+final_dataset<-left_join(final_dataset,cohort_with_propofol_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_diazepam_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_midazolam_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_lorazepam_infusion_neg_epoch)
+final_dataset<-left_join(final_dataset,cohort_with_dexmedetomedie_infusion_neg_epoch)
+
 
 #new drugs with only neg infusions Epochs joins
 final_dataset<-left_join(final_dataset,cohort_with_phenylephrine_infusion_neg_epoch)
@@ -66,7 +82,64 @@ library(foreign)
 write.dta(final_dataset, "final_dataset.dta")
 cat(names(final_dataset),sep = '\n')
 #view(dfSummary(final_dataset))
-
 ```
+
+# Variables distribution
+
+```{r}
+view(dfSummary(final_dataset%>%select(
+propofol_bolus_epoch_01,
+propofol_bolus_epoch_02,
+diazepam_bolus_epoch_01,
+diazepam_bolus_epoch_02,
+midazolam_bolus_epoch_01,
+midazolam_bolus_epoch_02,
+lorazepam_bolus_epoch_01,
+lorazepam_bolus_epoch_02,
+dexmedetomedie_bolus_epoch_01,
+dexmedetomedie_bolus_epoch_02,
+propofol_infusion_epoch_01,
+propofol_infusion_epoch_02,
+diazepam_infusion_epoch_01,
+diazepam_infusion_epoch_02,
+midazolam_infusion_epoch_01,
+midazolam_infusion_epoch_02,
+lorazepam_infusion_epoch_01,
+lorazepam_infusion_epoch_02,
+dexmedetomedie_infusion_epoch_01,
+dexmedetomedie_infusion_epoch_02,
+propofol_bolus_neg_epoch_01,
+propofol_bolus_neg_epoch_02,
+diazepam_bolus_neg_epoch_01,
+diazepam_bolus_neg_epoch_02,
+midazolam_bolus_neg_epoch_01,
+midazolam_bolus_neg_epoch_02,
+lorazepam_bolus_neg_epoch_01,
+lorazepam_bolus_neg_epoch_02,
+dexmedetomedie_bolus_neg_epoch_01,
+dexmedetomedie_bolus_neg_epoch_02,
+propofol_infusion_neg_epoch_01,
+propofol_infusion_neg_epoch_02,
+diazepam_infusion_neg_epoch_01,
+diazepam_infusion_neg_epoch_02,
+midazolam_infusion_neg_epoch_01,
+midazolam_infusion_neg_epoch_02,
+lorazepam_infusion_neg_epoch_01,
+lorazepam_infusion_neg_epoch_02,
+dexmedetomedie_infusion_neg_epoch_01,
+dexmedetomedie_infusion_neg_epoch_02,
+phenylephrine_infusion_neg_epoch_01,
+phenylephrine_infusion_neg_epoch_02,
+norepinephrine_infusion_neg_epoch_01,
+norepinephrine_infusion_neg_epoch_02,
+dopamine_infusion_neg_epoch_01,
+dopamine_infusion_neg_epoch_02,
+epinephrine_infusion_neg_epoch_01,
+epinephrine_infusion_neg_epoch_02,
+vasopressin_infusion_neg_epoch_01,
+vasopressin_infusion_neg_epoch_02
+)))
+```
+
 
 
