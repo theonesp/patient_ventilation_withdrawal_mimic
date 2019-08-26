@@ -3,6 +3,7 @@
 .RData
 .Ruserdata
 00_connection_settings.Rmd
-.DS_Store
+*.DS_Store
 *.csv
 documents
+.DS_Store

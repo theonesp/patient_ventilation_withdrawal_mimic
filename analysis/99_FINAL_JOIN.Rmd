@@ -14,7 +14,7 @@ library(dplyr)
 library(summarytools)
 ```
 
-## Data extraction
+## Data join
 
 ### Final Dataset
 ```{r}
